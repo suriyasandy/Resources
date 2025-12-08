@@ -1,0 +1,1592 @@
+# Cross-Product Alert Linkage Framework for Investment Banking Middle Office
+
+**Document Purpose:** Detailed technical framework for linking OMRC (Off-Market Rate Checking) and middle-office exceptions across product families in investment banking operations.
+
+**Scope:** GFX, Rates (IRD), Credit, Equities, and derived/structured products.
+
+**Date:** December 2025
+
+---
+
+## Executive Summary
+
+In investment banking middle office, trade exceptions and OMRC alerts originate from multiple products across different desks and systems. A single trade lifecycle can generate alerts across:
+
+- **Front-office systems** (trade booking, amendments)
+- **Middle-office systems** (off-market rate checks, completeness checks, matching)
+- **Back-office systems** (settlement, confirmations, breaks)
+
+Cross-product alert linkage means: **Given an alert in Product A, automatically identify and rank all related alerts (across Products B, C, D and time) that belong to the same "exception case" or trading event.**
+
+This document outlines the **data model, linking rules, feature extraction, and implementation patterns** to achieve this.
+
+---
+
+## Part 1: Product Families & Alert Landscape
+
+### 1.1 Product Families in Scope
+
+Investment banking typically covers:
+
+| Product Family | Sub-Products | Typical Alert Types |
+|---|---|---|
+| **FX (GFX)** | Spot, Forward, FX Swaps, Exotic Options, Vanillas | Off-market rate, Missing docs, Late booking, Confirmation mismatch, OMRC breach |
+| **Rates (IRD)** | Plain Vanilla IRS, Swaptions, Caps/Floors, FRAs, Bonds | Off-market rate, Missing hedge confirmation, Trade vs. system mismatch, Settlement instructions |
+| **Credit** | CDS, CLN, Bond trading, Repo | Off-market spread, Missing collateral terms, Settlement delay, Break notification |
+| **Equities** | Spot, Options, Structured notes, Warrants | Off-market price, Missing corporate action, Execution deviation, Dividend treatment |
+| **Structured / Hybrid** | CLIQUET, Range accruals, Barriers, Convertibles | Multiple leg mismatches, Component pricing breach, Barrier breach, Knock events |
+
+### 1.2 Types of Alerts & Exceptions
+
+Alerts originate from multiple systems and rules:
+
+1. **OMRC Alerts** (primary focus):
+   - Generated when trade price deviates from market rate by threshold.
+   - Centralized; requires rate justification and sign-off.
+   - Time-sensitive (often same-day escalation).
+
+2. **Completeness Alerts**:
+   - Missing confirmation, documentation, or settlement instructions.
+   - Generated from middle office exception handlers.
+   - Often linked to same client/product.
+
+3. **Matching / Reconciliation Alerts**:
+   - Trade vs. system discrepancies (quantity, rate, dates).
+   - Client vs. internal confirmation mismatch.
+   - Leg / component matching within a structure.
+
+4. **Operational / Break Alerts**:
+   - Settlement fails, collateral shortfall, corporate actions.
+   - Usually back-office generated but escalate to middle office.
+
+5. **KYC / Compliance Alerts**:
+   - Client limit breach, unsupported product, sanctioned party.
+   - Can block trade processing.
+
+### 1.3 Why Cross-Product Linkage Matters
+
+Scenario 1: **FX Hedge + Funding Trade**
+- Client executes a GFX EURUSD forward (10M, 1M tenor).
+- Simultaneously funds with a Rates IRS in EUR (10M, 1M).
+- Both generate OMRC alerts (FX rate breach, IRS rate breach).
+- **Linkage:** These two alerts are part of **same economic transaction** even though in different products.
+- **Benefit:** Ops can understand context, resolve together, manage exception holistically.
+
+Scenario 2: **Structured Note + Hedges**
+- A Equity CLIQUET on SPX is booked; linked hedge trades in Equities (long calls, short puts) generated automatically.
+- OMRC alert on main trade + alert on one hedge component.
+- **Linkage:** Must link all 3 alerts to understand full position and justification.
+
+Scenario 3: **Broken Trade Recontracting**
+- Original GFX trade breaks (settlement fail).
+- Replacement trade booked next day.
+- Multiple alerts (original + replacement + documentation missing).
+- **Linkage:** Must show ops that these are recontracting, not separate issues.
+
+---
+
+## Part 2: Core Data Model
+
+### 2.1 Canonical Alert Schema
+
+Create a **unified view** across all product systems:
+
+```
+TABLE: canonical_alerts
+
+Primary Key: alert_id (unique identifier, UUID or system-assigned)
+
+Trade Identifiers:
+  - internal_trade_id       VARCHAR  (unique per system)
+  - external_trade_id       VARCHAR  (client/counterparty reference)
+  - package_id              VARCHAR  (grouping for multi-leg structures)
+  - sales_ticket_id         VARCHAR  (sales capture id, if available)
+  - email_thread_id         VARCHAR  (extracted from email linkage system)
+  - recontracting_link_id   VARCHAR  (if recontracting, link to original)
+
+Party & Desk:
+  - client_id               VARCHAR  (master client identifier)
+  - counterparty_id         VARCHAR  (if not client)
+  - trader_id               VARCHAR
+  - sales_id                VARCHAR
+  - book_id                 VARCHAR  (trading book)
+  - desk_id                 VARCHAR  (desk grouping)
+  - region                  VARCHAR  (e.g., EMEA, APAC, AMER)
+
+Economic Attributes:
+  - product_family          VARCHAR  (GFX, Rates, Credit, Equities, Structured)
+  - product_type            VARCHAR  (e.g., FX_Spot, FX_Swap, IRS, CDS, Equity_Option)
+  - product_subtype         VARCHAR  (Vanilla, Exotic, Barrier, Range, etc.)
+  - base_currency_1         CHAR(3)  (e.g., EUR)
+  - base_currency_2         CHAR(3)  (e.g., USD, or NULL for single-leg)
+  - settlement_currency     CHAR(3)  (settlement ccy if different)
+  - notional_amount         DECIMAL  (absolute notional)
+  - notional_ccy            CHAR(3)
+  - quantity                DECIMAL  (for equity/bonds)
+  - side                    VARCHAR  (BUY, SELL, PAYER, RECEIVER, LONG, SHORT)
+  - tenor_days              INT      (days to maturity)
+  - tenor_bucket            VARCHAR  (O/N, 1W, 1M, 3M, 6M, 1Y, Multi, Spot)
+  - trade_date              DATE
+  - value_date              DATE
+  - maturity_date           DATE
+  - fixing_date             DATE
+  - price                   DECIMAL  (execution price)
+  - rate                    DECIMAL  (execution rate / yield)
+  - premium                 DECIMAL  (for options, warrants)
+  - strike                  DECIMAL  (for options)
+  - barrier_level           DECIMAL  (for exotics)
+
+Alert Metadata:
+  - alert_id                VARCHAR  (PK)
+  - alert_type              VARCHAR  (OMRC, Completeness, Matching, Break, KYC)
+  - alert_subtype           VARCHAR  (e.g., OffMarket_Rate, Missing_Confirmation, Settlement_Fail)
+  - severity                VARCHAR  (Critical, High, Medium, Low)
+  - alert_generated_ts      TIMESTAMP
+  - alert_acknowledged_ts   TIMESTAMP
+  - alert_closed_ts         TIMESTAMP
+  - alert_status            VARCHAR  (Open, Acknowledged, Under_Review, Resolved, Closed, False_Positive)
+  - reason_code             VARCHAR  (code for alert trigger)
+  - exception_handler_id    VARCHAR  (who was assigned)
+  - escalation_level        INT      (0=initial, 1=supervisor, 2=management)
+
+Rate / Price Justification:
+  - off_market_amount       DECIMAL  (bp or %, deviation from market)
+  - off_market_threshold    DECIMAL  (configured threshold)
+  - market_rate_used        DECIMAL  (benchmark rate used for comparison)
+  - market_source           VARCHAR  (Bloomberg, Reuters, Internal, Client)
+  - justification_comment   TEXT     (why deviation is acceptable)
+  - sign_off_by             VARCHAR  (who approved)
+  - sign_off_ts             TIMESTAMP
+
+Free Text & Documents:
+  - email_subject           TEXT     (extracted email subject)
+  - email_excerpt           TEXT     (key sentences from emails)
+  - capture_comments        TEXT     (trader/sales notes at booking)
+  - alert_reason_text       TEXT     (description of why alert fired)
+  - confirmation_id         VARCHAR  (SWIFT, internal confirmation)
+  - settlement_instructions TEXT
+
+System Metadata:
+  - source_system           VARCHAR  (which system generated alert: OMRC_Engine, MO_Exception_Handler, SWB, etc.)
+  - last_updated_ts         TIMESTAMP
+  - created_ts              TIMESTAMP
+  - version                 INT      (for audit trail)
+```
+
+### 2.2 Trade Components (for multi-leg structures)
+
+For **structured products** (swaps with multiple legs, CLIQUET with options, convertibles):
+
+```
+TABLE: trade_components
+
+Primary Key: component_id
+
+  - internal_trade_id       VARCHAR  (FK to parent trade)
+  - component_sequence      INT      (1, 2, 3, ... for legs)
+  - component_type          VARCHAR  (Fixed_Leg, Float_Leg, Option_Leg, etc.)
+  - base_currency           CHAR(3)
+  - notional_ccy            CHAR(3)
+  - notional_amount         DECIMAL
+  - side                    VARCHAR
+  - rate_index              VARCHAR  (e.g., 3M_Euribor, SPX, VIX)
+  - rate_fixing_date        DATE
+  - rate_spread             DECIMAL
+  - payment_schedule        VARCHAR  (quarterly, semi-annual, etc.)
+  - component_status        VARCHAR  (Active, Expired, Knockedout, etc.)
+```
+
+This allows linking of legs separately if individual alerts occur.
+
+---
+
+## Part 3: Linking Rules by Scenario
+
+### 3.1 EXACT DETERMINISTIC LINKS (Score: 100)
+
+These imply **definitely same exception case**:
+
+#### 3.1.1 Same Trade, Same System
+
+```
+Rule: SAME_INTERNAL_TRADE_ID
+
+Condition:
+  alert_A.internal_trade_id = alert_B.internal_trade_id
+  AND alert_A.alert_id < alert_B.alert_id  (avoid duplicates)
+
+Interpretation:
+  Both alerts relate to identical trade in system.
+  
+Link Type: HARD (must be linked)
+
+Example:
+  - OMRC alert for GFX trade at 2025-12-08 10:30
+  - Completeness alert (missing confirmation) at 2025-12-08 11:45
+  - Both have internal_trade_id = "TRD_20251208_12345"
+  → Link with score 100, rule="SAME_INTERNAL_TRADE_ID"
+```
+
+#### 3.1.2 Same External Trade Reference
+
+```
+Rule: SAME_EXTERNAL_ID
+
+Condition:
+  alert_A.external_trade_id = alert_B.external_trade_id
+  AND external_trade_id IS NOT NULL
+  AND alert_A.source_system != alert_B.source_system  (different systems)
+
+Interpretation:
+  Client or counterparty reference is identical; different systems reported.
+  
+Link Type: HARD
+
+Example:
+  - Client books GFX trade; provides external ref "CLIENT_2025_123"
+  - This is stored in internal system as TRD_XYZ
+  - Later, OMRC system independently checks and cites "CLIENT_2025_123"
+  - Both alerts refer to same client-side trade ref
+  → Link with score 100, rule="SAME_EXTERNAL_ID"
+```
+
+#### 3.1.3 Same SWB Case ID (Historical)
+
+```
+Rule: SAME_SWB_CASE_ID
+
+Condition:
+  Both alerts linked to same SWB case_id in historical linkage system.
+  (This is your current manual tracking.)
+
+Interpretation:
+  Ops have already determined these are the same exception case.
+  
+Link Type: HARD
+
+Output:
+  Validates that Phase-1 engine can recover past linkages;
+  useful for accuracy metrics.
+```
+
+#### 3.1.4 Confirmed Recontracting
+
+```
+Rule: RECONTRACTING_LINK
+
+Condition:
+  alert_A.internal_trade_id = "TRD_ORIGINAL"
+  alert_B.internal_trade_id = "TRD_REPLACEMENT"
+  AND alert_B.recontracting_link_id = alert_A.internal_trade_id
+  AND |alert_B.trade_date - alert_A.trade_date| ≤ 2 business days
+
+Interpretation:
+  Trade was broken/repriced; replacement booked shortly after.
+  Both original and replacement alerts are part of same case.
+
+Link Type: HARD
+
+Example:
+  - Original GFX trade fails settlement; OMRC alert logged.
+  - Next day, replacement trade booked with explicit "recontracting_link" field.
+  - Both alerts linked as recontracting scenario.
+  → Score 95, rule="RECONTRACTING_LINK"
+```
+
+---
+
+### 3.2 STRONG HEURISTIC LINKS (Score: 70–89)
+
+These indicate **probable relationship** but require confirmation:
+
+#### 3.2.1 Same Client, Same Product, Same Time Window
+
+```
+Rule: SAME_CLIENT_PRODUCT_TIME
+
+Condition:
+  alert_A.client_id = alert_B.client_id
+  AND alert_A.product_family = alert_B.product_family
+  AND |alert_B.alert_generated_ts - alert_A.alert_generated_ts| ≤ 4 hours
+  AND alert_A.product_type != alert_B.product_type  (different legs/variants)
+
+Scoring:
+  Base: 60
+  + 10 if same book/desk
+  + 5 if same trader
+  + 5 if same tenor_bucket
+
+Interpretation:
+  Same client, same product family, alerts within 4 hours → likely same trade or leg.
+
+Example:
+  - Client books IRS 1M EUR; OMRC alert on fixed leg at 2025-12-08 09:00
+  - Completeness alert (missing hedge confirmation) at 2025-12-08 10:30
+  - Same client, product_family=Rates, both alerts within 4 hours
+  → Link with score 70–80, rule="SAME_CLIENT_PRODUCT_TIME"
+```
+
+#### 3.2.2 Notional Matching with Economic Correlation
+
+```
+Rule: NOTIONAL_AND_ECONOMIC_MATCH
+
+Condition:
+  alert_A.client_id = alert_B.client_id
+  AND alert_A.notional_ccy = alert_B.notional_ccy
+  AND rel_notional_diff(notional_A, notional_B) ≤ 0.05  (within 5%)
+  AND |rate_diff(alert_A, alert_B)| ≤ threshold_by_product  (see below)
+  AND |tenor_days_A - tenor_days_B| ≤ 7  (tenor within 1 week)
+
+Product-Specific Rate Thresholds:
+  - GFX: rate_diff ≤ 2 bp (or 0.02%)
+  - Rates: rate_diff ≤ 5 bp
+  - Credit: spread_diff ≤ 10 bp
+  - Equities: price_diff ≤ 0.5% or 1 ULP (unit in last place)
+
+Scoring:
+  Base: 55
+  + 15 if notional_diff ≤ 1%
+  + 10 if rate_diff ≤ threshold / 2
+  + 10 if tenor_diff ≤ 1 day
+  + 5 if time_window ≤ 2 hours
+  
+Interpretation:
+  Different alerts but nearly identical economic terms → likely same trade or very similar execution.
+
+Example:
+  - Alert A: GFX EURUSD forward, 10M notional, rate 1.1234, tenor 30d
+  - Alert B: GFX EURUSD forward, 10.05M notional (0.5% diff), rate 1.1233, tenor 31d
+  - Same client, within 1 hour, same desk
+  → Link with score 75–85, rule="NOTIONAL_AND_ECONOMIC_MATCH"
+```
+
+#### 3.2.3 Hedging Relationship (Explicit or Implicit)
+
+```
+Rule: HEDGE_RELATIONSHIP
+
+Condition (Explicit):
+  One alert references hedge_id or parent_trade_id of the other.
+  
+Condition (Implicit):
+  alert_A.product_family ∈ {GFX, Rates, Equities}
+  AND alert_B.product_family = Structured
+  AND alert_B.package_id = alert_A.package_id
+  AND |time_diff| ≤ 1 business day
+  
+Scoring:
+  Base: 70 (explicit hedge refs)
+  Base: 60 (implicit structural hedge)
+  + 10 if both alerts same trader/sales
+
+Interpretation:
+  One trade is documented hedge of another within a package.
+  
+Example:
+  - Equity CLIQUET booked with package_id = "PKG_20251208_001"
+  - Long calls and short puts on SPX booked as legs
+  - OMRC alert on main CLIQUET, pricing alert on one leg
+  - Both reference same package_id
+  → Link with score 70, rule="HEDGE_RELATIONSHIP"
+```
+
+#### 3.2.4 Same Client + Time Window, Different Products (Economic Intent)
+
+```
+Rule: CROSS_PRODUCT_CLIENT_TIME
+
+Condition:
+  alert_A.client_id = alert_B.client_id
+  AND alert_A.product_family ≠ alert_B.product_family
+  AND |alert_B.alert_generated_ts - alert_A.alert_generated_ts| ≤ 8 hours
+  AND alert_A.base_currency_1 = alert_B.base_currency_1  (same ccy or related leg)
+
+Scoring:
+  Base: 45
+  + 15 if both products commonly paired (GFX + Rates, Equities + Credit)
+  + 10 if same tenor bucket
+  + 5 if same trader
+  
+Interpretation:
+  Client doing simultaneous multi-product trade (e.g., FX forward + IRS hedge).
+  Alerts are likely part of same "economic event" even if different products.
+
+Example:
+  - GFX EURUSD forward alert (Alert A, 2025-12-08 09:30)
+  - Rates IRS EUR 1M alert (Alert B, 2025-12-08 10:45)
+  - Same client, both in EUR, same trader
+  → Link with score 60–70, rule="CROSS_PRODUCT_CLIENT_TIME"
+```
+
+---
+
+### 3.3 WEAK / SUGGESTIVE LINKS (Score: 40–69)
+
+These indicate **possible relationship** but many false positives:
+
+#### 3.3.1 Same Counterparty (Third Party) + Time Window
+
+```
+Rule: SAME_COUNTERPARTY_TIME
+
+Condition:
+  alert_A.counterparty_id = alert_B.counterparty_id
+  AND counterparty_id IS NOT NULL
+  AND |alert_B.alert_generated_ts - alert_A.alert_generated_ts| ≤ 12 hours
+
+Scoring:
+  Base: 35
+  + 10 if same product_family
+  + 5 if time_diff ≤ 4 hours
+  + 5 if same region
+
+Interpretation:
+  Same counterparty, close timing → might be related trades in batch, 
+  but weaker signal than client_id.
+
+Example:
+  - Two alerts for Bank A (counterparty) on same day, different products
+  → Link with score 40–50, rule="SAME_COUNTERPARTY_TIME"
+  (useful for compliance / counterparty risk cross-check)
+```
+
+#### 3.3.2 Tenor Bucket + Ccy Cluster (Desk Concentration)
+
+```
+Rule: TENOR_CCY_DESK_CLUSTER
+
+Condition:
+  alert_A.tenor_bucket = alert_B.tenor_bucket
+  AND alert_A.base_currency_1 = alert_B.base_currency_1
+  AND alert_A.desk_id = alert_B.desk_id
+  AND |alert_B.alert_generated_ts - alert_A.alert_generated_ts| ≤ 6 hours
+  AND |alert_A.notional_ccy - alert_B.notional_ccy| (sum within 25% of either)
+
+Scoring:
+  Base: 35
+  + 10 if same trader
+  + 5 if same product_type
+
+Interpretation:
+  Multiple alerts in same tenor/ccy bucket on same desk → likely related 
+  market conditions or batch of similar trades, but not specific linkage.
+
+Example:
+  - Three 1M EUR IRS alerts on desk GFX_EMEA within 2 hours
+  → Weakly linked, rule="TENOR_CCY_DESK_CLUSTER"
+  (useful for risk aggregation, but each pair score ~50)
+```
+
+---
+
+### 3.4 LINKAGE RULES BY PRODUCT PAIR
+
+#### 3.4.1 **GFX ↔ Rates (FX/Funding Pairs)**
+
+**Most common real-world linkage:**
+
+| Scenario | Rule | Score | Condition |
+|----------|------|-------|-----------|
+| Spot + IRS hedge | SPOT_IRS_HEDGE | 80–90 | Same client, FX spot notional ≈ IRS notional, time ≤ 4h, same ccy leg |
+| Forward + IRS | FWD_IRS_HEDGE | 75–85 | Same client, forward notional ≈ IRS notional, tenor match, same ccy |
+| FX swap + funding | FXSWAP_FUNDING | 70–80 | FX swap leg 1 ccy = IRS ccy, notional ≈, same trader, ≤ 4h |
+| TBA (to-be-announced) | TBA_COMPLEX | 50–65 | Both GFX and Rates with package_id or email_thread_id, ≤ 8h |
+
+#### 3.4.2 **Equities ↔ Credit (Structured Financing)**
+
+| Scenario | Rule | Score | Condition |
+|----------|------|-------|-----------|
+| Equity collar + CDS | COLLAR_CDS | 75–85 | Same underlying, same client, tenor match, package_id |
+| Convertible + hedge | CONVERTIBLE_HEDGE | 70–80 | Convertible bond + equity option/stock futures, same notional, ≤ 8h |
+| Structured note + options | NOTE_OPTION_PAIR | 65–75 | Note linked to option leg, same client, price feedback correlation |
+
+#### 3.4.3 **Rates ↔ Rates (Multi-Leg IRS, Swaps)**
+
+| Scenario | Rule | Score | Condition |
+|----------|------|-------|-----------|
+| Fixed/Float legs of same swap | SWAP_LEGS | 95–100 | Same internal_trade_id or same package_id, component_type matching |
+| Swaption + underlying swap | SWAPTION_UNDERLYING | 85–90 | Swaption strikes/tenor → underlying IRS, same client, ≤ 1 day |
+| Curve trade (3M vs 6M) | CURVE_TRADE | 70–80 | Same base_ccy, different tenor_buckets, same desk, ≤ 2h, opposite sides |
+
+#### 3.4.4 **GFX ↔ Credit (Exotic Financing)**
+
+| Scenario | Rule | Score | Condition |
+|----------|------|-------|-----------|
+| FX-embedded bond + FX hedge | FX_BOND_HEDGE | 75–85 | Bond + FX forward/option, same client, notional match, ≤ 8h |
+| Convertible + FX hedge | CONVERTIBLE_FX | 70–80 | Convertible in non-base ccy + FX option, same client, tenor match |
+
+---
+
+## Part 4: Feature Engineering for Cross-Product Linkage
+
+### 4.1 Feature Categories
+
+For each pair of alerts `(alert_A, alert_B)`, extract:
+
+#### **Category 1: Exact Key Matching (Binary)**
+
+```python
+features = {
+    'same_internal_trade_id': int(A.internal_trade_id == B.internal_trade_id),
+    'same_external_id': int(A.external_trade_id == B.external_trade_id and A.external_trade_id is not None),
+    'same_swb_case_id': int(A.swb_case_id == B.swb_case_id and A.swb_case_id is not None),
+    'same_package_id': int(A.package_id == B.package_id and A.package_id is not None),
+    'same_email_thread_id': int(A.email_thread_id == B.email_thread_id and A.email_thread_id is not None),
+    'recontracting_link': int(B.recontracting_link_id == A.internal_trade_id),
+}
+```
+
+#### **Category 2: Party Matching**
+
+```python
+features = {
+    'same_client_id': int(A.client_id == B.client_id),
+    'same_counterparty': int(A.counterparty_id == B.counterparty_id and A.counterparty_id is not None),
+    'same_trader_id': int(A.trader_id == B.trader_id and A.trader_id is not None),
+    'same_sales_id': int(A.sales_id == B.sales_id and A.sales_id is not None),
+    'same_book': int(A.book_id == B.book_id),
+    'same_desk': int(A.desk_id == B.desk_id),
+    'same_region': int(A.region == B.region),
+}
+```
+
+#### **Category 3: Economic Similarity (Continuous)**
+
+```python
+import math
+
+def relative_diff(a, b):
+    if max(abs(a), abs(b)) == 0:
+        return 0
+    return abs(a - b) / max(abs(a), abs(b))
+
+def time_diff_hours(ts_a, ts_b):
+    return abs((ts_b - ts_a).total_seconds()) / 3600
+
+features = {
+    # Notional
+    'notional_rel_diff': relative_diff(A.notional_amount, B.notional_amount),
+    'notional_same_ccy': int(A.notional_ccy == B.notional_ccy),
+    
+    # Rate / Price
+    'rate_diff_bp': abs(A.rate - B.rate) * 10000 if A.rate and B.rate else None,  # in basis points
+    'price_rel_diff': relative_diff(A.price, B.price),
+    
+    # Tenor / Maturity
+    'tenor_day_diff': abs(A.tenor_days - B.tenor_days) if A.tenor_days and B.tenor_days else None,
+    'same_tenor_bucket': int(A.tenor_bucket == B.tenor_bucket),
+    'maturity_date_diff_days': (B.maturity_date - A.maturity_date).days if A.maturity_date and B.maturity_date else None,
+    
+    # Time proximity
+    'alert_time_diff_hours': time_diff_hours(A.alert_generated_ts, B.alert_generated_ts),
+    'trade_date_diff_days': (B.trade_date - A.trade_date).days if A.trade_date and B.trade_date else None,
+    
+    # Currencies
+    'same_base_ccy_1': int(A.base_currency_1 == B.base_currency_1),
+    'same_base_ccy_2': int(A.base_currency_2 == B.base_currency_2),
+    'ccy_pair_match': int({A.base_currency_1, A.base_currency_2} == {B.base_currency_1, B.base_currency_2}),
+}
+```
+
+#### **Category 4: Product & Alert Type**
+
+```python
+features = {
+    'same_product_family': int(A.product_family == B.product_family),
+    'same_product_type': int(A.product_type == B.product_type),
+    'same_alert_type': int(A.alert_type == B.alert_type),
+    
+    # Product relationships (manually coded mappings)
+    'is_known_hedge_pair': int(is_hedge_pair(A.product_family, B.product_family, 
+                                              A.product_type, B.product_type)),
+    'products_commonly_paired': int(are_commonly_paired(A.product_family, B.product_family)),
+    
+    # Alert severity and status
+    'same_severity': int(A.severity == B.severity),
+    'either_critical': int(A.severity == 'Critical' or B.severity == 'Critical'),
+}
+```
+
+#### **Category 5: Text Similarity**
+
+```python
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+def text_similarity_score(text_a, text_b, method='tfidf'):
+    """
+    method: 'tfidf' or 'token_set_ratio' (RapidFuzz)
+    returns: 0–1 score
+    """
+    if not text_a or not text_b:
+        return 0
+    
+    if method == 'tfidf':
+        vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2,2))
+        try:
+            tfidf = vectorizer.fit_transform([text_a, text_b])
+            return cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
+        except:
+            return 0
+    
+    # For token_set (requires: pip install rapidfuzz)
+    from rapidfuzz import fuzz
+    return fuzz.token_set_ratio(text_a, text_b) / 100
+
+features = {
+    'subject_similarity': text_similarity_score(A.email_subject, B.email_subject, method='tfidf'),
+    'capture_comments_similarity': text_similarity_score(A.capture_comments, B.capture_comments),
+    'alert_reason_similarity': text_similarity_score(A.alert_reason_text, B.alert_reason_text),
+    
+    'combined_text_similarity': (
+        0.4 * text_similarity_score(A.email_subject, B.email_subject) +
+        0.3 * text_similarity_score(A.capture_comments, B.capture_comments) +
+        0.3 * text_similarity_score(A.alert_reason_text, B.alert_reason_text)
+    ),
+}
+```
+
+#### **Category 6: Derived / Composite Features**
+
+```python
+def is_natural_hedge(product_a, product_b):
+    """
+    Check if two products form a natural hedge (e.g., long + short, payer + receiver).
+    """
+    hedges = {
+        ('GFX_Spot', 'GFX_Forward'): True,
+        ('GFX_Swap', 'Rates_IRS'): True,
+        ('Equities_Call', 'Equities_Put'): True,
+        ('Credit_CDS_Long', 'Credit_CDS_Short'): True,
+    }
+    return hedges.get((product_a, product_b)) or hedges.get((product_b, product_a)) or False
+
+features = {
+    # Economic narrative
+    'is_potential_hedge': int(is_natural_hedge(A.product_type, B.product_type) or 
+                             (A.side != B.side if A.side and B.side else False)),
+    'is_recontracting': int(A.recontracting_link_id is not None or B.recontracting_link_id is not None),
+    'is_portfolio_trade': int(A.package_id is not None and A.package_id == B.package_id),
+    
+    # Time-based
+    'is_intraday': int(features['alert_time_diff_hours'] < 8),
+    'is_same_business_day': int(features['trade_date_diff_days'] == 0 if 'trade_date_diff_days' in features else False),
+    
+    # Magnitude
+    'large_notional_both': int(A.notional_amount > 5e6 and B.notional_amount > 5e6),  # > $5M
+}
+```
+
+---
+
+### 4.2 Feature Matrix for Phase-1 Rules
+
+Assemble all features into a table for scoring:
+
+```
+TABLE: linkage_feature_matrix
+
+Columns (organized by category):
+  - alert_id_a, alert_id_b (pair identifier)
+  
+EXACT MATCHING (6 features):
+  - same_internal_trade_id
+  - same_external_id
+  - same_swb_case_id
+  - same_package_id
+  - same_email_thread_id
+  - recontracting_link
+  
+PARTY MATCHING (7 features):
+  - same_client_id
+  - same_counterparty
+  - same_trader_id
+  - same_sales_id
+  - same_book
+  - same_desk
+  - same_region
+  
+ECONOMIC (8 features):
+  - notional_rel_diff
+  - notional_same_ccy
+  - rate_diff_bp
+  - price_rel_diff
+  - tenor_day_diff
+  - same_tenor_bucket
+  - maturity_date_diff_days
+  
+TIME PROXIMITY (2 features):
+  - alert_time_diff_hours
+  - trade_date_diff_days
+  
+CURRENCY (3 features):
+  - same_base_ccy_1
+  - same_base_ccy_2
+  - ccy_pair_match
+  
+PRODUCT & ALERT (5 features):
+  - same_product_family
+  - same_product_type
+  - same_alert_type
+  - is_known_hedge_pair
+  - products_commonly_paired
+  
+TEXT SIMILARITY (4 features):
+  - subject_similarity
+  - capture_comments_similarity
+  - alert_reason_similarity
+  - combined_text_similarity
+  
+DERIVED / COMPOSITE (6 features):
+  - is_potential_hedge
+  - is_recontracting
+  - is_portfolio_trade
+  - is_intraday
+  - is_same_business_day
+  - large_notional_both
+  
+FINAL SCORE (1 feature):
+  - linkage_score (0–100, computed per rules below)
+  - linkage_rule_fired (VARCHAR, name of matching rule)
+  - linkage_confidence (VARCHAR, HARD / STRONG / WEAK)
+
+Total: ~42 input features + 3 output features per pair
+```
+
+---
+
+## Part 5: Phase-1 Scoring Algorithm
+
+### 5.1 Rule-Based Scoring (Deterministic to Weak)
+
+Implement as a **decision tree / if-else cascade**:
+
+```python
+def compute_linkage_score(alert_a, alert_b, feature_dict):
+    """
+    Cascade through rule tiers; return (score, rule_name).
+    """
+    
+    # ═══════════════════════════════════════════════════════════════
+    # TIER 1: EXACT DETERMINISTIC (Score: 95–100)
+    # ═══════════════════════════════════════════════════════════════
+    
+    if feature_dict['same_internal_trade_id']:
+        return 100, "SAME_INTERNAL_TRADE_ID"
+    
+    if feature_dict['same_external_id']:
+        return 100, "SAME_EXTERNAL_ID"
+    
+    if feature_dict['same_swb_case_id']:
+        return 100, "SAME_SWB_CASE_ID"
+    
+    if feature_dict['recontracting_link']:
+        score = 95
+        if feature_dict['same_client_id']:
+            score += 2
+        return score, "RECONTRACTING_LINK"
+    
+    # ═══════════════════════════════════════════════════════════════
+    # TIER 2: STRONG HEURISTIC (Score: 70–89)
+    # ═══════════════════════════════════════════════════════════════
+    
+    # Rule: SAME_CLIENT_PRODUCT_TIME
+    if (feature_dict['same_client_id'] and 
+        feature_dict['same_product_family'] and 
+        feature_dict['alert_time_diff_hours'] <= 4):
+        
+        score = 70
+        if feature_dict['same_book']:
+            score += 10
+        if feature_dict['same_trader_id']:
+            score += 5
+        if feature_dict['same_tenor_bucket']:
+            score += 5
+        return min(score, 89), "SAME_CLIENT_PRODUCT_TIME"
+    
+    # Rule: NOTIONAL_AND_ECONOMIC_MATCH
+    notional_ok = feature_dict.get('notional_rel_diff', 1) <= 0.05
+    tenor_ok = feature_dict.get('tenor_day_diff', 100) is not None and \
+               abs(feature_dict['tenor_day_diff']) <= 7
+    
+    rate_threshold = {
+        'GFX': 0.0002,    # 2 bp
+        'Rates': 0.0005,  # 5 bp
+        'Credit': 0.001,  # 10 bp
+        'Equities': 0.005,  # 0.5%
+    }
+    product = alert_a.product_family
+    rate_ok = True
+    if 'rate_diff_bp' in feature_dict and feature_dict['rate_diff_bp'] is not None:
+        threshold = rate_threshold.get(product, 0.001)
+        rate_ok = abs(feature_dict['rate_diff_bp']) <= (threshold * 10000)
+    
+    if (feature_dict['same_client_id'] and 
+        feature_dict['notional_same_ccy'] and 
+        notional_ok and tenor_ok and rate_ok):
+        
+        score = 55
+        if feature_dict['notional_rel_diff'] <= 0.01:
+            score += 15
+        if rate_ok and 'rate_diff_bp' in feature_dict:
+            if feature_dict['rate_diff_bp'] <= rate_threshold.get(product, 0.001) * 5000:
+                score += 10
+        if feature_dict['tenor_day_diff'] <= 1:
+            score += 10
+        if feature_dict['alert_time_diff_hours'] <= 2:
+            score += 5
+        return min(score, 89), "NOTIONAL_AND_ECONOMIC_MATCH"
+    
+    # Rule: HEDGE_RELATIONSHIP
+    if feature_dict['is_known_hedge_pair']:
+        score = 70
+        if feature_dict['same_trader_id']:
+            score += 10
+        return min(score, 85), "HEDGE_RELATIONSHIP"
+    
+    # Rule: CROSS_PRODUCT_CLIENT_TIME
+    if (feature_dict['same_client_id'] and 
+        not feature_dict['same_product_family'] and 
+        feature_dict['alert_time_diff_hours'] <= 8 and 
+        (feature_dict['same_base_ccy_1'] or feature_dict['same_base_ccy_2'])):
+        
+        score = 45
+        if feature_dict['products_commonly_paired']:
+            score += 15
+        if feature_dict['same_tenor_bucket']:
+            score += 10
+        if feature_dict['same_trader_id']:
+            score += 5
+        return min(score, 80), "CROSS_PRODUCT_CLIENT_TIME"
+    
+    # ═══════════════════════════════════════════════════════════════
+    # TIER 3: WEAK / SUGGESTIVE (Score: 40–69)
+    # ═══════════════════════════════════════════════════════════════
+    
+    # Rule: SAME_COUNTERPARTY_TIME
+    if (feature_dict['same_counterparty'] and 
+        feature_dict['alert_time_diff_hours'] <= 12):
+        
+        score = 35
+        if feature_dict['same_product_family']:
+            score += 10
+        if feature_dict['alert_time_diff_hours'] <= 4:
+            score += 5
+        if feature_dict['same_region']:
+            score += 5
+        return min(score, 55), "SAME_COUNTERPARTY_TIME"
+    
+    # Rule: TENOR_CCY_DESK_CLUSTER
+    if (feature_dict['same_tenor_bucket'] and 
+        feature_dict['same_base_ccy_1'] and 
+        feature_dict['same_desk'] and 
+        feature_dict['alert_time_diff_hours'] <= 6):
+        
+        score = 35
+        if feature_dict['same_trader_id']:
+            score += 10
+        if feature_dict['same_product_type']:
+            score += 5
+        return min(score, 55), "TENOR_CCY_DESK_CLUSTER"
+    
+    # ═══════════════════════════════════════════════════════════════
+    # TEXT-BASED FALLBACK (Score: 20–50)
+    # ═══════════════════════════════════════════════════════════════
+    
+    combined_text_sim = feature_dict.get('combined_text_similarity', 0)
+    if combined_text_sim >= 0.80:
+        return 50, "TEXT_SIMILARITY_HIGH"
+    elif combined_text_sim >= 0.60:
+        return 35, "TEXT_SIMILARITY_MEDIUM"
+    
+    # ═══════════════════════════════════════════════════════════════
+    # NO MATCH (Score: 0)
+    # ═══════════════════════════════════════════════════════════════
+    
+    return 0, "NO_MATCH"
+```
+
+### 5.2 Score Bands and Action
+
+Bucket final scores into confidence levels:
+
+```python
+def classify_link_confidence(score):
+    if score >= 90:
+        return "HARD", "Auto-link; definitely same case"
+    elif score >= 70:
+        return "STRONG", "Probable link; display to ops with confidence"
+    elif score >= 50:
+        return "MODERATE", "Possible link; show as lower-priority suggestion"
+    elif score >= 30:
+        return "WEAK", "Weak signal; only display if requested or for analytics"
+    else:
+        return "NO_LINK", "No meaningful relationship"
+```
+
+---
+
+## Part 6: Implementation Workflow (Phase-1 Pipeline)
+
+### 6.1 Data Preparation
+
+```python
+# Step 1: Extract canonical alerts from all sources
+import pandas as pd
+from datetime import datetime, timedelta
+
+# Pseudo-code: merge from multiple systems
+omrc_alerts = pd.read_sql("SELECT * FROM omrc_alerts", conn)
+mo_exceptions = pd.read_sql("SELECT * FROM mo_exceptions", conn)
+swb_cases = pd.read_sql("SELECT * FROM swb_linkages", conn)
+
+canonical_alerts = normalize_and_union([omrc_alerts, mo_exceptions, swb_cases])
+canonical_alerts.to_csv("canonical_alerts.csv", index=False)
+
+# Step 2: Load and validate
+df_alerts = pd.read_csv("canonical_alerts.csv")
+print(f"Total alerts: {len(df_alerts)}")
+print(f"Products: {df_alerts['product_family'].unique()}")
+print(f"Date range: {df_alerts['alert_generated_ts'].min()} to {df_alerts['alert_generated_ts'].max()}")
+```
+
+### 6.2 Feature Extraction
+
+```python
+# Step 3: Generate all pairs for recent alerts
+# (to avoid explosion, limit to recent + same client + time window)
+
+recent_cutoff = datetime.now() - timedelta(days=30)
+df_recent = df_alerts[df_alerts['alert_generated_ts'] >= recent_cutoff].copy()
+
+def generate_candidate_pairs(df):
+    """
+    Generate candidate pairs using efficient bucketing.
+    Instead of O(n²) Cartesian product, use grouping.
+    """
+    pairs = []
+    
+    # Within same client + time window (±3 days)
+    for client_id in df['client_id'].unique():
+        df_client = df[df['client_id'] == client_id]
+        df_client_sorted = df_client.sort_values('alert_generated_ts')
+        
+        for idx, (i, row_a) in enumerate(df_client_sorted.iterrows()):
+            # Only pair with subsequent rows (avoid duplicates)
+            for j, row_b in df_client_sorted.iloc[idx+1:].iterrows():
+                time_diff = (row_b['alert_generated_ts'] - row_a['alert_generated_ts']).total_seconds() / 3600
+                
+                # Apply time filter: max 72 hours
+                if time_diff <= 72:
+                    pairs.append({
+                        'alert_id_a': row_a['alert_id'],
+                        'alert_id_b': row_b['alert_id'],
+                    })
+    
+    return pd.DataFrame(pairs)
+
+df_pairs = generate_candidate_pairs(df_recent)
+print(f"Generated {len(df_pairs)} candidate pairs from {len(df_recent)} recent alerts")
+```
+
+### 6.3 Feature Computation
+
+```python
+# Step 4: Compute features for each pair
+from rapidfuzz import fuzz
+
+def extract_features_for_pair(row_a, row_b):
+    """
+    Given two alert rows, extract full feature vector.
+    """
+    features = {}
+    
+    # ─────── EXACT MATCHING ───────
+    features['same_internal_trade_id'] = (
+        row_a['internal_trade_id'] == row_b['internal_trade_id'] and 
+        pd.notna(row_a['internal_trade_id'])
+    )
+    features['same_external_id'] = (
+        row_a['external_trade_id'] == row_b['external_trade_id'] and 
+        pd.notna(row_a['external_trade_id'])
+    )
+    features['same_swb_case_id'] = (
+        row_a['swb_case_id'] == row_b['swb_case_id'] and 
+        pd.notna(row_a['swb_case_id'])
+    )
+    features['same_package_id'] = (
+        row_a['package_id'] == row_b['package_id'] and 
+        pd.notna(row_a['package_id'])
+    )
+    features['same_email_thread_id'] = (
+        row_a['email_thread_id'] == row_b['email_thread_id'] and 
+        pd.notna(row_a['email_thread_id'])
+    )
+    features['recontracting_link'] = (
+        pd.notna(row_b['recontracting_link_id']) and 
+        row_b['recontracting_link_id'] == row_a['internal_trade_id']
+    )
+    
+    # ─────── PARTY MATCHING ───────
+    features['same_client_id'] = row_a['client_id'] == row_b['client_id']
+    features['same_counterparty'] = (
+        row_a['counterparty_id'] == row_b['counterparty_id'] and 
+        pd.notna(row_a['counterparty_id'])
+    )
+    features['same_trader_id'] = (
+        row_a['trader_id'] == row_b['trader_id'] and 
+        pd.notna(row_a['trader_id'])
+    )
+    features['same_sales_id'] = (
+        row_a['sales_id'] == row_b['sales_id'] and 
+        pd.notna(row_a['sales_id'])
+    )
+    features['same_book'] = row_a['book_id'] == row_b['book_id']
+    features['same_desk'] = row_a['desk_id'] == row_b['desk_id']
+    features['same_region'] = row_a['region'] == row_b['region']
+    
+    # ─────── ECONOMIC ───────
+    def rel_diff(a, b):
+        if pd.isna(a) or pd.isna(b):
+            return None
+        denom = max(abs(a), abs(b))
+        return 0 if denom == 0 else abs(a - b) / denom
+    
+    features['notional_rel_diff'] = rel_diff(
+        row_a['notional_amount'], row_b['notional_amount']
+    )
+    features['notional_same_ccy'] = (
+        row_a['notional_ccy'] == row_b['notional_ccy']
+    )
+    
+    if pd.notna(row_a['rate']) and pd.notna(row_b['rate']):
+        features['rate_diff_bp'] = abs(row_a['rate'] - row_b['rate']) * 10000
+    else:
+        features['rate_diff_bp'] = None
+    
+    features['price_rel_diff'] = rel_diff(row_a['price'], row_b['price'])
+    
+    if pd.notna(row_a['tenor_days']) and pd.notna(row_b['tenor_days']):
+        features['tenor_day_diff'] = abs(row_a['tenor_days'] - row_b['tenor_days'])
+    else:
+        features['tenor_day_diff'] = None
+    
+    features['same_tenor_bucket'] = row_a['tenor_bucket'] == row_b['tenor_bucket']
+    
+    if pd.notna(row_a['maturity_date']) and pd.notna(row_b['maturity_date']):
+        features['maturity_date_diff_days'] = (
+            row_b['maturity_date'] - row_a['maturity_date']
+        ).days
+    else:
+        features['maturity_date_diff_days'] = None
+    
+    # ─────── TIME PROXIMITY ───────
+    time_diff = (row_b['alert_generated_ts'] - row_a['alert_generated_ts']).total_seconds() / 3600
+    features['alert_time_diff_hours'] = time_diff
+    
+    if pd.notna(row_a['trade_date']) and pd.notna(row_b['trade_date']):
+        features['trade_date_diff_days'] = (row_b['trade_date'] - row_a['trade_date']).days
+    else:
+        features['trade_date_diff_days'] = None
+    
+    # ─────── CURRENCY ───────
+    features['same_base_ccy_1'] = row_a['base_currency_1'] == row_b['base_currency_1']
+    features['same_base_ccy_2'] = (
+        (row_a['base_currency_2'] == row_b['base_currency_2']) if 
+        (pd.notna(row_a['base_currency_2']) and pd.notna(row_b['base_currency_2'])) 
+        else False
+    )
+    features['ccy_pair_match'] = (
+        {row_a['base_currency_1'], row_a['base_currency_2']} == 
+        {row_b['base_currency_1'], row_b['base_currency_2']}
+    )
+    
+    # ─────── PRODUCT & ALERT ───────
+    features['same_product_family'] = row_a['product_family'] == row_b['product_family']
+    features['same_product_type'] = row_a['product_type'] == row_b['product_type']
+    features['same_alert_type'] = row_a['alert_type'] == row_b['alert_type']
+    
+    # Known hedge pairs (manually coded)
+    hedge_pairs = {
+        ('GFX', 'Rates'),
+        ('Equities', 'Credit'),
+        ('Rates', 'Rates'),  # Swap legs
+    }
+    features['is_known_hedge_pair'] = (
+        (row_a['product_family'], row_b['product_family']) in hedge_pairs or
+        (row_b['product_family'], row_a['product_family']) in hedge_pairs
+    )
+    
+    common_pairs = {
+        ('GFX', 'Rates'),
+        ('GFX', 'Equities'),
+        ('Credit', 'Equities'),
+    }
+    features['products_commonly_paired'] = (
+        (row_a['product_family'], row_b['product_family']) in common_pairs or
+        (row_b['product_family'], row_a['product_family']) in common_pairs
+    )
+    
+    features['same_severity'] = row_a['severity'] == row_b['severity']
+    features['either_critical'] = (
+        row_a['severity'] == 'Critical' or row_b['severity'] == 'Critical'
+    )
+    
+    # ─────── TEXT SIMILARITY ───────
+    def text_sim(t1, t2):
+        if pd.isna(t1) or pd.isna(t2):
+            return 0
+        return fuzz.token_set_ratio(str(t1), str(t2)) / 100
+    
+    features['subject_similarity'] = text_sim(
+        row_a['email_subject'], row_b['email_subject']
+    )
+    features['capture_comments_similarity'] = text_sim(
+        row_a['capture_comments'], row_b['capture_comments']
+    )
+    features['alert_reason_similarity'] = text_sim(
+        row_a['alert_reason_text'], row_b['alert_reason_text']
+    )
+    
+    features['combined_text_similarity'] = (
+        0.4 * features['subject_similarity'] +
+        0.3 * features['capture_comments_similarity'] +
+        0.3 * features['alert_reason_similarity']
+    )
+    
+    # ─────── DERIVED ───────
+    features['is_potential_hedge'] = (
+        features['is_known_hedge_pair'] or
+        (pd.notna(row_a.get('side')) and pd.notna(row_b.get('side')) and 
+         row_a['side'] != row_b['side'])
+    )
+    features['is_recontracting'] = (
+        pd.notna(row_a.get('recontracting_link_id')) or 
+        pd.notna(row_b.get('recontracting_link_id'))
+    )
+    features['is_portfolio_trade'] = (
+        pd.notna(row_a.get('package_id')) and 
+        row_a['package_id'] == row_b['package_id']
+    )
+    features['is_intraday'] = time_diff < 8
+    features['is_same_business_day'] = (
+        features['trade_date_diff_days'] == 0 if 
+        features.get('trade_date_diff_days') is not None else False
+    )
+    features['large_notional_both'] = (
+        (row_a['notional_amount'] > 5e6) and (row_b['notional_amount'] > 5e6)
+    )
+    
+    return features
+
+# Apply to all pairs
+feature_list = []
+for idx, pair_row in df_pairs.iterrows():
+    alert_a = df_alerts[df_alerts['alert_id'] == pair_row['alert_id_a']].iloc[0]
+    alert_b = df_alerts[df_alerts['alert_id'] == pair_row['alert_id_b']].iloc[0]
+    
+    feat_dict = extract_features_for_pair(alert_a, alert_b)
+    feat_dict['alert_id_a'] = pair_row['alert_id_a']
+    feat_dict['alert_id_b'] = pair_row['alert_id_b']
+    feature_list.append(feat_dict)
+    
+    if (idx + 1) % 1000 == 0:
+        print(f"  Processed {idx + 1} pairs...")
+
+df_features = pd.DataFrame(feature_list)
+df_features.to_csv("linkage_features.csv", index=False)
+print(f"✓ Computed features for {len(df_features)} pairs")
+```
+
+### 6.4 Scoring and Ranking
+
+```python
+# Step 5: Apply scoring function and rank
+
+def compute_linkage_score(row):
+    """Wrapper for phase-1 scoring function."""
+    feature_dict = row.to_dict()
+    score, rule = compute_linkage_score(
+        None,  # not using alert objects, just features
+        None, 
+        feature_dict
+    )
+    return pd.Series({'linkage_score': score, 'linkage_rule': rule})
+
+df_features[['linkage_score', 'linkage_rule']] = df_features.apply(
+    compute_linkage_score, axis=1
+)
+
+# Classify confidence
+df_features['linkage_confidence'] = df_features['linkage_score'].apply(
+    lambda s: classify_link_confidence(s)[0]
+)
+
+# Filter and rank
+df_results = df_features[df_features['linkage_score'] > 0].copy()
+df_results = df_results.sort_values('linkage_score', ascending=False)
+
+print(f"\n{len(df_results)} pairs with score > 0:")
+print(df_results[['alert_id_a', 'alert_id_b', 'linkage_score', 'linkage_rule', 'linkage_confidence']].head(20))
+
+# Save
+df_results.to_csv("linkage_results.csv", index=False)
+```
+
+### 6.5 UI Integration (Candidate Display)
+
+```python
+# Step 6: For each alert, display suggested linkages
+
+def get_suggested_linkages(alert_id, df_results, limit=5, min_score=50):
+    """
+    For a given alert, retrieve top N suggested linkages.
+    """
+    # Find all pairs involving this alert
+    pairs_as_a = df_results[df_results['alert_id_a'] == alert_id]
+    pairs_as_b = df_results[df_results['alert_id_b'] == alert_id]
+    
+    # Normalize: always show alert_id_a as reference, alert_id_b as candidate
+    pairs_as_a['candidate_alert_id'] = pairs_as_a['alert_id_b']
+    pairs_as_b['candidate_alert_id'] = pairs_as_b['alert_id_a']
+    
+    all_pairs = pd.concat([pairs_as_a, pairs_as_b], ignore_index=True)
+    all_pairs = all_pairs[all_pairs['linkage_score'] >= min_score]
+    all_pairs = all_pairs.sort_values('linkage_score', ascending=False)
+    
+    return all_pairs[['candidate_alert_id', 'linkage_score', 'linkage_rule', 'linkage_confidence']].head(limit)
+
+# Example: show suggestions for alert_id = "ALERT_20251208_001"
+suggestions = get_suggested_linkages("ALERT_20251208_001", df_results, limit=5)
+print("\nSuggested Linkages for ALERT_20251208_001:")
+print(suggestions)
+```
+
+---
+
+## Part 7: Integration into SWB / Middle Office Workflow
+
+### 7.1 Database Schema Extension
+
+```sql
+-- Add linkage columns to canonical_alerts table
+
+ALTER TABLE canonical_alerts ADD COLUMN (
+    suggested_linkage_ids   VARCHAR(1000),  -- JSON array of suggested alert IDs
+    suggested_linkage_scores VARCHAR(500),  -- JSON array of scores
+    manually_linked_to      VARCHAR(100),   -- ops-confirmed link
+    linkage_feedback_ts     TIMESTAMP,      -- when ops confirmed/rejected
+    is_linkage_confirmed    BOOLEAN DEFAULT FALSE
+);
+
+-- New table to track ops feedback
+CREATE TABLE linkage_feedback (
+    feedback_id     INT PRIMARY KEY AUTO_INCREMENT,
+    alert_id_a      VARCHAR(100),
+    alert_id_b      VARCHAR(100),
+    operator_id     VARCHAR(50),
+    action          VARCHAR(20),  -- LINKED, REJECTED, UNDECIDED
+    reason_comment  TEXT,
+    feedback_ts     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 7.2 SWB / UI Panel Layout
+
+When ops opens an alert in SWB, display:
+
+```
+┌─────────────────────────────────────────────┐
+│ Alert ID: ALERT_20251208_001                │
+│ Product: GFX | Status: Open | Severity: High│
+│─────────────────────────────────────────────│
+│ DETAILS                                     │
+│  Client: ABC Corp                           │
+│  Notional: $10.5M (EURUSD)                  │
+│  Alert Type: OMRC off-market (5 bp breach)  │
+│─────────────────────────────────────────────│
+│ SUGGESTED LINKAGES (Beta)                   │
+│                                             │
+│ Confidence │ Alert ID        │ Score │ Why │
+│ ═══════════════════════════════════════════│
+│ HARD       │ ALERT_20251208_ │  98   │ Same│
+│            │  _002           │       │ intl│
+│            │                 │       │ trd │
+│            │ [Link] [Skip]   │       │     │
+│─────────────────────────────────────────────│
+│ STRONG     │ ALERT_20251208_ │  75   │ Same│
+│            │  _003           │       │ clt,│
+│            │                 │       │ time│
+│            │ [Link] [Skip]   │       │     │
+│─────────────────────────────────────────────│
+│ MODERATE   │ ALERT_20251207_ │  52   │Text│
+│            │  _999           │       │sim │
+│            │                 │       │     │
+│            │ [Link] [Skip]   │       │     │
+│─────────────────────────────────────────────│
+| Not Linked: ___________________             |
+└─────────────────────────────────────────────┘
+```
+
+### 7.3 Feedback Loop (Training Data for Phase-2 ML)
+
+```python
+# Capture operator feedback when they click "Link" or "Skip"
+
+def record_linkage_feedback(alert_id_a, alert_id_b, action, operator_id, reason=""):
+    """
+    Log operator decision for later ML training.
+    action: 'LINKED' | 'REJECTED'
+    """
+    record = {
+        'alert_id_a': alert_id_a,
+        'alert_id_b': alert_id_b,
+        'operator_id': operator_id,
+        'action': action,
+        'reason_comment': reason,
+        'feedback_ts': datetime.now(),
+    }
+    
+    # Insert into DB
+    db.insert('linkage_feedback', record)
+    
+    # Update canonical_alerts if LINKED
+    if action == 'LINKED':
+        db.update('canonical_alerts', 
+                  where={'alert_id': alert_id_a},
+                  set={'manually_linked_to': alert_id_b, 
+                       'is_linkage_confirmed': True,
+                       'linkage_feedback_ts': datetime.now()})
+    
+    print(f"✓ Recorded: {alert_id_a} - {alert_id_b} = {action}")
+
+# Example
+record_linkage_feedback(
+    'ALERT_20251208_001', 
+    'ALERT_20251208_002', 
+    'LINKED',
+    'ops_user_123',
+    'Both same trade, OMRC + confirmation alert'
+)
+```
+
+---
+
+## Part 8: Sample Output & Validation Metrics
+
+### 8.1 Example Linkage Results
+
+```
+Alert A: ALERT_20251208_0001
+  Product: GFX FX Forward
+  Client: ABC Corp
+  Notional: $10M EURUSD
+  Rate: 1.1234
+  Alert Type: OMRC (off-market by 3 bp)
+  Generated: 2025-12-08 09:30
+
+Suggested Linkages (Top 5):
+
+[1] ALERT_20251208_0002
+    Score: 98 | Rule: SAME_INTERNAL_TRADE_ID
+    Confidence: HARD
+    Details: Same trade, confirmation alert (missing docs)
+    
+[2] ALERT_20251208_0003
+    Score: 75 | Rule: SAME_CLIENT_PRODUCT_TIME
+    Confidence: STRONG
+    Details: Same client ABC Corp, GFX product, 1h apart
+    Features: notional_rel_diff=0.2%, time_diff=1h, same_trader=yes
+    
+[3] ALERT_20251207_9999
+    Score: 52 | Rule: NOTIONAL_AND_ECONOMIC_MATCH
+    Confidence: MODERATE
+    Details: Same client, notional within 2%, rate within 2 bp, tenor match (30d)
+    
+[4] ALERT_20251208_0005
+    Score: 35 | Rule: SAME_COUNTERPARTY_TIME
+    Confidence: WEAK
+    Details: Same counterparty bank, 8h apart, different product
+    
+[5] ALERT_20251207_0004
+    Score: 28 | Rule: TENOR_CCY_DESK_CLUSTER
+    Confidence: WEAK
+    Details: Same desk, same tenor (1M), same ccy (EUR), close timing
+```
+
+### 8.2 Validation Metrics
+
+After Phase-1 deployment, measure:
+
+```
+1. Precision@5:
+   Of top 5 suggestions shown to ops,
+   how many do they confirm as correct linkage?
+   Target: ≥ 80%
+
+2. Recall@10:
+   Of all true linkages ops manually create,
+   how many appear in top 10 suggestions?
+   Target: ≥ 85%
+
+3. Rules Coverage:
+   % of pairs that fire at least one rule
+   (vs. "no match" score=0)
+   Target: ≥ 40% of candidate pairs
+
+4. Time Savings:
+   Average time to close exception
+   Before: X minutes
+   After (with suggestions): Y minutes
+   Target: Y < 0.7*X (30% faster)
+
+5. False Positive Rate:
+   % of "HARD" (score ≥90) suggestions that ops reject
+   Target: ≤ 5%
+```
+
+---
+
+## Part 9: Edge Cases & Special Scenarios
+
+### 9.1 Partially Filled / Amended Trades
+
+```
+Scenario: Trade A booked with incomplete details (e.g., no rate yet).
+          Later amended; Alert B generated after amendment.
+
+Handling:
+  - Both alerts reference same internal_trade_id
+  → Rule SAME_INTERNAL_TRADE_ID fires automatically (score 100)
+  
+  - If internal_trade_id changes (system reissue),
+    link via external_id or package_id
+  → Rule SAME_EXTERNAL_ID or SAME_PACKAGE_ID (score 100)
+```
+
+### 9.2 Novation / Assignment
+
+```
+Scenario: Trade A is novated to Party B (Party A exits, Party B enters).
+          Multiple alerts (original, novation, new).
+
+Handling:
+  - Track via special flag: novation_link_id = original_trade_id
+  - Score = 90–95 (similar to recontracting)
+  - Display to ops: "Novation chain" explanation
+```
+
+### 9.3 Corporate Actions (Equities)
+
+```
+Scenario: Equity trade affected by dividend, split, or merger.
+          Original alert + corporate action alert + settlement alert.
+
+Handling:
+  - Link via: product_type, underlying_id, ex_date
+  - Score = 75–85 (STRONG)
+  - Tag: is_corporate_action = True for special handling
+```
+
+### 9.4 Multi-Currency Transactions
+
+```
+Scenario: Trade with multiple legs in different CCY.
+          Alerts per leg, plus aggregate alert.
+
+Handling:
+  - Extract base_currency_1, base_currency_2, settlement_currency
+  - Link via package_id + component_sequence
+  - For leg-level alerts: match on matching legs
+```
+
+---
+
+## Part 10: Roadmap to Phase 2 (ML)
+
+After Phase-1 stabilizes (4–6 weeks):
+
+### 10.1 Supervised Learning Setup
+
+```
+Input: 
+  - All features from Phase-1 feature matrix (42 features)
+  - Labels: Operator linkage feedback (from linkage_feedback table)
+  
+Output:
+  - Binary classifier: P(related | features)
+  - Replaces hand-coded scoring function
+  
+Data:
+  Target: ≥500–1000 labeled pairs (30–50% positive, 50–70% negative)
+  Timeline: Ops feedback accumulates over 4–6 weeks
+  
+Models to try:
+  - Logistic Regression (baseline, interpretable)
+  - Gradient Boosted Trees (XGBoost, LightGBM)
+  - Random Forest
+  
+Evaluation:
+  - 80/20 train/test split
+  - Metrics: Precision, Recall, ROC-AUC, F1
+  - Threshold tuning for desired precision/recall tradeoff
+```
+
+### 10.2 Embedding-Based Cross-Product Linkage
+
+```
+Goal: Better generalization across products.
+
+Method:
+  - Build dense embedding of each alert
+    (combine structured features + text embeddings + product indicators)
+  - Use similarity/distance metrics (cosine, Euclidean)
+  - Nearest neighbor search (FAISS or similar)
+  
+Implementation:
+  - Pre-train small LLM on financial trade descriptions
+  - Or use multi-modal embedding (Sentence-BERT variant for finance)
+  - Index all historical alerts
+  - For new alert, compute embedding and retrieve top-K similar
+  
+Benefit:
+  - Automatic discovery of cross-product relationships
+  - No need to hardcode hedge pairs / commonly paired products
+  - Scales as product portfolio grows
+```
+
+---
+
+## Conclusion
+
+**Phase-1 Deliverables:**
+
+1. ✓ Canonical alert schema (unified view across products)
+2. ✓ Deterministic linking rules (exact keys)
+3. ✓ Heuristic similarity rules (economic, temporal, textual)
+4. ✓ Feature matrix (42 engineered features per pair)
+5. ✓ Scoring algorithm (rule-based cascade, 0–100 scale)
+6. ✓ Implementation pipeline (Python end-to-end)
+7. ✓ SWB integration (suggested linkages panel)
+8. ✓ Feedback loop (ops training data collection)
+
+**Expected Outcomes:**
+
+- Reduce manual linkage effort by 40–60%
+- Improve exception case understanding and closure time
+- Build foundation (labeled data + features) for Phase-2 ML
+- Enable cross-product visibility for risk/compliance
+
+**Next Steps:**
+
+1. Finalize canonical schema with your actual column names / systems
+2. Extract 6–12 months of historical data
+3. Build feature extraction pipeline
+4. Deploy Phase-1 rules engine + UI integration
+5. Collect 4–6 weeks of operator feedback
+6. Transition to Phase-2 supervised ML model
+
+---
+
+**Document End**
