@@ -1,0 +1,296 @@
+import pandas as pd
+import numpy as np
+from itertools import combinations
+from sklearn.metrics.pairwise import cosine_similarity
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Step 1: Load your dataset
+df = pd.read_csv("your_alerts_dataset.csv")
+# Assuming columns: alert_id, controlobject (product), client_id, alert_generated_ts, etc.
+
+print(df.head())
+print(f"Unique products: {df['controlobject'].nunique()}")
+
+# Step 2: Create a grouping key (e.g., by client + time window)
+# This defines "what is considered together"
+
+# Option A: Group by client (products appearing for same client)
+df['group_key'] = df['client_id']
+
+# Option B: Group by client + date (same client, same day)
+df['alert_date'] = pd.to_datetime(df['alert_generated_ts']).dt.date
+df['group_key'] = df['client_id'].astype(str) + "_" + df['alert_date'].astype(str)
+
+# Option C: Group by SWB case_id (if you have manually linked cases)
+# df['group_key'] = df['swb_case_id']
+
+# Step 3: Build co-occurrence matrix
+def build_cooccurrence_matrix(df, group_col='group_key', product_col='controlobject'):
+    """
+    Build co-occurrence matrix: how often two products appear in same group.
+    """
+    # Get unique products
+    products = sorted(df[product_col].unique())
+    n = len(products)
+    
+    # Initialize matrix
+    cooccur_matrix = pd.DataFrame(0, index=products, columns=products)
+    
+    # Count co-occurrences
+    grouped = df.groupby(group_col)[product_col].apply(list)
+    
+    for group_id, product_list in grouped.items():
+        # Get unique products in this group
+        unique_products = list(set(product_list))
+        
+        # For each pair of products in this group, increment count
+        for prod_a, prod_b in combinations(unique_products, 2):
+            cooccur_matrix.loc[prod_a, prod_b] += 1
+            cooccur_matrix.loc[prod_b, prod_a] += 1  # Symmetric
+        
+        # Diagonal: product appears alone
+        for prod in unique_products:
+            cooccur_matrix.loc[prod, prod] += 1
+    
+    return cooccur_matrix
+
+cooccur_df = build_cooccurrence_matrix(df, group_col='group_key', product_col='controlobject')
+
+print("\nCo-occurrence Matrix:")
+print(cooccur_df)
+
+# Step 4: Normalize to get co-occurrence probability
+# Convert counts to probabilities or lift scores
+
+def compute_lift_matrix(cooccur_df):
+    """
+    Lift = P(A and B) / (P(A) * P(B))
+    Lift > 1 means A and B appear together more than expected by chance.
+    """
+    total_groups = cooccur_df.values.diagonal().sum()  # Total number of groups
+    
+    # Probability of each product
+    prob_vector = cooccur_df.values.diagonal() / total_groups
+    
+    # Lift matrix
+    lift_matrix = pd.DataFrame(index=cooccur_df.index, columns=cooccur_df.columns, dtype=float)
+    
+    for i, prod_a in enumerate(cooccur_df.index):
+        for j, prod_b in enumerate(cooccur_df.columns):
+            if i == j:
+                lift_matrix.iloc[i, j] = 1.0  # Product with itself
+            else:
+                prob_a = prob_vector[i]
+                prob_b = prob_vector[j]
+                prob_ab = cooccur_df.iloc[i, j] / total_groups
+                
+                if prob_a > 0 and prob_b > 0:
+                    lift_matrix.iloc[i, j] = prob_ab / (prob_a * prob_b)
+                else:
+                    lift_matrix.iloc[i, j] = 0
+    
+    return lift_matrix
+
+lift_df = compute_lift_matrix(cooccur_df)
+
+print("\nLift Matrix (values > 1 indicate strong association):")
+print(lift_df)
+
+# Step 5: Visualize as heatmap
+plt.figure(figsize=(12, 10))
+sns.heatmap(lift_df.astype(float), annot=True, fmt='.2f', cmap='YlOrRd', 
+            cbar_kws={'label': 'Lift Score'})
+plt.title('Product Co-occurrence Lift Matrix\n(>1 = Products appear together more than expected)')
+plt.xlabel('Product')
+plt.ylabel('Product')
+plt.tight_layout()
+plt.savefig('product_cooccurrence_heatmap.png', dpi=300)
+plt.show()
+
+# Step 6: Extract top product pairs
+def get_top_pairs(lift_df, top_n=20, min_lift=1.5):
+    """
+    Extract top N product pairs with highest lift.
+    """
+    pairs = []
+    for i, prod_a in enumerate(lift_df.index):
+        for j, prod_b in enumerate(lift_df.columns):
+            if i < j:  # Upper triangle only (avoid duplicates)
+                lift_val = lift_df.iloc[i, j]
+                if lift_val >= min_lift:
+                    pairs.append({
+                        'product_a': prod_a,
+                        'product_b': prod_b,
+                        'lift': lift_val,
+                        'cooccurrence_count': cooccur_df.iloc[i, j]
+                    })
+    
+    pairs_df = pd.DataFrame(pairs).sort_values('lift', ascending=False)
+    return pairs_df.head(top_n)
+
+top_pairs = get_top_pairs(lift_df, top_n=20, min_lift=1.2)
+print("\nTop 20 Product Pairs (by Lift):")
+print(top_pairs)
+
+top_pairs.to_csv('top_product_pairs.csv', index=False)
+
+
+# Install: pip install mlxtend
+
+from mlxtend.frequent_patterns import apriori, association_rules
+from mlxtend.preprocessing import TransactionEncoder
+
+# Step 1: Prepare transaction format
+# Each "transaction" = one group (client, case, time window)
+transactions = df.groupby('group_key')['controlobject'].apply(list).tolist()
+
+print(f"Total transactions: {len(transactions)}")
+print(f"Sample: {transactions[:3]}")
+
+# Step 2: Encode as binary matrix
+te = TransactionEncoder()
+te_ary = te.fit(transactions).transform(transactions)
+df_encoded = pd.DataFrame(te_ary, columns=te.columns_)
+
+print("\nEncoded transaction matrix:")
+print(df_encoded.head())
+
+# Step 3: Apply Apriori algorithm to find frequent itemsets
+frequent_itemsets = apriori(df_encoded, min_support=0.05, use_colnames=True)
+# min_support = 5% means product pair must appear in at least 5% of groups
+
+print(f"\nFound {len(frequent_itemsets)} frequent itemsets:")
+print(frequent_itemsets.sort_values('support', ascending=False).head(20))
+
+# Step 4: Generate association rules
+rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.2)
+# lift > 1.2 means 20% more likely to appear together than random
+
+rules = rules.sort_values('lift', ascending=False)
+
+print(f"\nTop Association Rules:")
+print(rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']].head(20))
+
+# Step 5: Interpret rules
+# Example rule: {GFX} -> {Rates} with lift=2.5
+# Means: If GFX alert exists, Rates alert is 2.5x more likely than baseline
+
+rules.to_csv('product_association_rules.csv', index=False)
+
+# Step 6: Visualize top rules
+import matplotlib.pyplot as plt
+
+top_rules = rules.head(15)
+plt.figure(figsize=(10, 6))
+plt.scatter(top_rules['support'], top_rules['confidence'], 
+            s=top_rules['lift']*50, alpha=0.6, c=top_rules['lift'], cmap='viridis')
+plt.colorbar(label='Lift')
+plt.xlabel('Support')
+plt.ylabel('Confidence')
+plt.title('Association Rules: Product Relationships\n(Bubble size = Lift)')
+
+for idx, row in top_rules.iterrows():
+    plt.annotate(f"{list(row['antecedents'])[0]}→{list(row['consequents'])[0]}", 
+                 (row['support'], row['confidence']), 
+                 fontsize=8, alpha=0.7)
+
+plt.tight_layout()
+plt.savefig('association_rules_scatter.png', dpi=300)
+plt.show()
+
+
+
+import networkx as nx
+import matplotlib.pyplot as plt
+
+# Step 1: Build graph from top product pairs
+G = nx.Graph()
+
+# Add edges from association rules or co-occurrence pairs
+for idx, row in top_pairs.iterrows():
+    G.add_edge(row['product_a'], row['product_b'], 
+               weight=row['lift'], 
+               count=row['cooccurrence_count'])
+
+# Or from association rules:
+# for idx, row in rules.head(30).iterrows():
+#     antecedent = list(row['antecedents'])[0]
+#     consequent = list(row['consequents'])[0]
+#     G.add_edge(antecedent, consequent, weight=row['lift'])
+
+print(f"Graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+
+# Step 2: Compute network metrics
+degree_centrality = nx.degree_centrality(G)
+betweenness_centrality = nx.betweenness_centrality(G)
+
+print("\nMost connected products (degree centrality):")
+for prod, score in sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)[:10]:
+    print(f"  {prod}: {score:.3f}")
+
+# Step 3: Visualize network
+plt.figure(figsize=(14, 10))
+
+# Layout
+pos = nx.spring_layout(G, k=0.5, iterations=50)
+
+# Node sizes based on degree (how many connections)
+node_sizes = [degree_centrality[node] * 5000 for node in G.nodes()]
+
+# Edge widths based on lift
+edge_widths = [G[u][v]['weight'] * 2 for u, v in G.edges()]
+
+# Draw
+nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='lightblue', alpha=0.7)
+nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.5, edge_color='gray')
+nx.draw_networkx_labels(G, pos, font_size=10, font_weight='bold')
+
+plt.title('Product Relationship Network\n(Node size = Connectivity, Edge width = Lift)', 
+          fontsize=14)
+plt.axis('off')
+plt.tight_layout()
+plt.savefig('product_network_graph.png', dpi=300)
+plt.show()
+
+# Step 4: Identify communities (product clusters)
+from networkx.algorithms import community
+
+communities = community.greedy_modularity_communities(G)
+
+print(f"\nFound {len(communities)} product communities:")
+for i, comm in enumerate(communities):
+    print(f"  Community {i+1}: {list(comm)}")
+
+
+
+# Step 1: Pivot to product-feature matrix
+# Each row = one product, columns = aggregated numeric features
+
+product_features = df.groupby('controlobject').agg({
+    'notional_amount': 'mean',
+    'off_market_amount': 'mean',
+    'alert_time_diff_hours': 'mean',
+    'tenor_days': 'mean',
+    # Add more numeric columns
+}).fillna(0)
+
+print("Product feature matrix:")
+print(product_features.head())
+
+# Step 2: Compute correlation matrix
+corr_matrix = product_features.T.corr(method='pearson')  # or 'spearman'
+
+print("\nProduct correlation matrix:")
+print(corr_matrix)
+
+# Step 3: Visualize
+plt.figure(figsize=(12, 10))
+sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', center=0,
+            vmin=-1, vmax=1, cbar_kws={'label': 'Correlation'})
+plt.title('Product Correlation Based on Numeric Features')
+plt.tight_layout()
+plt.savefig('product_correlation_heatmap.png', dpi=300)
+plt.show()
+
+
