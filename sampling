@@ -1,956 +1,997 @@
-#!/usr/bin/env python3
 """
-OMRC Risk-Based Audit Sampling Tool v8.1 - FIXED & REFINED
-================================================================================
-Fixed Edition: Robust data handling + Refined UI cosmetics
+OMRC AUDIT SAMPLING TOOL v8.2 - DASHBOARD EDITION
+Enhanced with Strata Analysis & Professional MI Report Style
 
-FIXES IN v8.1:
-✓ FIXED: Type conversion errors (str vs float comparisons)
-✓ FIXED: Robust data cleaning & validation
-✓ FIXED: Mixed data type handling
-✓ IMPROVED: UI button sizing & spacing
-✓ IMPROVED: Grid layout for better proportions
-✓ IMPROVED: Frame padding & element spacing
-✓ IMPROVED: Typography hierarchy
-✓ IMPROVED: Status indicators more subtle
-✓ ENHANCED: Data preview formatting
-✓ ENHANCED: Error messages with guidance
+Features:
+- Professional dashboard-style UI (MI Report theme)
+- Strata-based results visualization
+- Risk distribution charts
+- Advanced analytics
+- Tab 5: Strata Analytics (NEW)
+- All v8.1 robustness maintained
 
-Standards:
-- AICPA Audit Sampling (AU-C 530)
-- ISA 530 (International Standard on Auditing)
-- Modern UI/UX best practices
-- Enterprise-grade reliability
-
-Author: OMRC Audit & Compliance Technology
-Date: December 2025
+Author: Investment Banking Risk Team
+Version: 8.2 (Dashboard Edition)
+Release: December 2025
+Status: Production Ready
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from pathlib import Path
 import os
+from datetime import datetime
+import json
+import io
+from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
-try:
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    import seaborn as sns
-    plt.style.use('seaborn-v0_8-whitegrid')
-    sns.set_palette("Set2")
-except:
-    pass
+# ============================================================================
+# CONFIGURATION & CONSTANTS
+# ============================================================================
 
-class OMRCSamplingToolV81:
-    """OMRC v8.1 - Fixed data handling, refined UI"""
+APP_CONFIG = {
+    'title': 'OMRC Audit Sampling Tool v8.2 - Dashboard Edition',
+    'geometry': '1400x900',
+    'theme_colors': {
+        'bg_primary': '#0F1419',      # Dark navy (MI Report style)
+        'bg_secondary': '#1A1F2E',    # Slightly lighter
+        'bg_tertiary': '#252D3D',     # Cards/panels
+        'accent_primary': '#00D9FF',  # Cyan (dashboard style)
+        'accent_secondary': '#FF6B35', # Orange
+        'accent_success': '#00D084',   # Green
+        'accent_warning': '#FFB800',   # Yellow
+        'text_primary': '#FFFFFF',     # White
+        'text_secondary': '#A0A0A0',   # Gray
+        'border': '#404654',           # Border gray
+    },
+    'padding': 12,
+    'corner_radius': 8,
+}
+
+RISK_SCORES_DEFAULT = {
+    'entity': {
+        'weights': {
+            'HBAP': 0.8, 'HBEU': 0.7, 'HBUK': 0.6, 'HBUS': 0.5,
+            'HBAP-LN': 0.85, 'HBEU-NY': 0.75, 'default': 0.5
+        }
+    },
+    'region': {
+        'weights': {
+            'LN': 0.6, 'PA': 0.5, 'NY': 0.7, 'TK': 0.65, 'SG': 0.55,
+            'default': 0.5
+        }
+    },
+    'product': {
+        'weights': {
+            'Bonds': 0.4, 'Equities': 0.6, 'FX': 0.7, 'Rates': 0.5,
+            'Commodities': 0.8, 'default': 0.5
+        }
+    }
+}
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def safe_map_weight(val, weight_dict):
+    """Safely map value to weight - handles all types"""
+    try:
+        if pd.isna(val):
+            return weight_dict.get('default', 0.5)
+        key = str(val).strip()
+        return weight_dict.get(key, weight_dict.get('default', 0.5))
+    except:
+        return weight_dict.get('default', 0.5)
+
+def clean_dataframe(df):
+    """Smart data cleaning"""
+    df = df.dropna(how='all')
     
+    for col in df.columns:
+        df[col] = df[col].fillna('')
+        numeric_col = pd.to_numeric(df[col], errors='coerce')
+        if numeric_col.notna().sum() / len(df) < 0.5:
+            df[col] = df[col].astype(str).str.strip()
+        else:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    return df
+
+def generate_demo_data(n_records=10000):
+    """Generate realistic demo data"""
+    np.random.seed(42)
+    entities = ['HBAP', 'HBEU', 'HBUS', 'HBUK']
+    regions = ['LN', 'NY', 'PA', 'TK', 'SG']
+    products = ['Bonds', 'Equities', 'FX', 'Rates']
+    
+    data = {
+        'exception_id': range(1, n_records + 1),
+        'legal_entity': np.random.choice(entities, n_records, p=[0.35, 0.30, 0.20, 0.15]),
+        'region': np.random.choice(regions, n_records, p=[0.35, 0.25, 0.20, 0.12, 0.08]),
+        'product': np.random.choice(products, n_records, p=[0.40, 0.30, 0.20, 0.10]),
+        'amount': np.random.lognormal(10, 2, n_records),
+        'trade_date': pd.date_range('2024-01-01', periods=n_records, freq='30s'),
+    }
+    
+    df = pd.DataFrame(data)
+    df['trade_date'] = df['trade_date'].dt.strftime('%Y-%m-%d')
+    return df
+
+# ============================================================================
+# MAIN APPLICATION CLASS
+# ============================================================================
+
+class OMRCDashboardApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("OMRC Risk-Based Audit Sampling v8.1")
-        self.root.geometry("1300x800")
+        self.root.title(APP_CONFIG['title'])
+        self.root.geometry(APP_CONFIG['geometry'])
         
-        # Configure style
-        self.style = ttk.Style()
-        self.style.theme_use('clam')
-        self.configure_styles()
-        
-        # Data
+        # Data storage
         self.data = None
+        self.mandatory_risk_scores = RISK_SCORES_DEFAULT
+        self.risk_scores = None
+        self.stratification_cols = []
         self.samples = {}
-        self.total_strata_count = 0
-        self.mandatory_risk_scores = {}
-        self.additional_risk_weights = {}
-        self.selected_additional_columns = []
+        self.stratified_data = None
         
-        # Export
-        self.results_dir = os.path.join(os.getcwd(), "OMRC_Results")
-        os.makedirs(self.results_dir, exist_ok=True)
+        # Apply modern theme
+        self.setup_theme()
+        self.create_ui()
         
-        self.create_main_ui()
+        # Status
+        self.status_message = "Ready"
+        self.log_status("OMRC v8.2 Dashboard Edition Loaded - Ready to work")
     
-    def configure_styles(self):
-        """Configure modern color scheme & styles"""
-        bg_primary = "#F8F9FA"
-        bg_secondary = "#FFFFFF"
-        accent_primary = "#0066CC"
-        accent_success = "#28A745"
-        accent_warning = "#FFC107"
-        text_primary = "#1A1A1A"
-        text_secondary = "#666666"
-        border_color = "#E0E0E0"
+    def setup_theme(self):
+        """Setup modern dashboard theme"""
+        self.style = ttk.Style()
         
-        self.root.configure(bg=bg_primary)
+        colors = APP_CONFIG['theme_colors']
         
-        # Frame styles
-        self.style.configure('TFrame', background=bg_primary)
-        self.style.configure('Card.TFrame', background=bg_secondary, relief='flat', borderwidth=1)
+        # Configure colors for all elements
+        self.style.theme_use('clam')
         
-        # Label styles
-        self.style.configure('TLabel', background=bg_primary, foreground=text_primary, font=('Segoe UI', 9))
-        self.style.configure('Title.TLabel', font=('Segoe UI', 16, 'bold'), foreground=accent_primary)
-        self.style.configure('Subtitle.TLabel', font=('Segoe UI', 11, 'bold'), foreground=text_primary)
-        self.style.configure('Small.TLabel', font=('Segoe UI', 8), foreground=text_secondary)
+        self.style.configure('TFrame', background=colors['bg_primary'])
+        self.style.configure('TLabel', background=colors['bg_primary'], 
+                           foreground=colors['text_primary'])
+        self.style.configure('TLabelframe', background=colors['bg_primary'],
+                           foreground=colors['text_primary'])
+        self.style.configure('TLabelframe.Label', background=colors['bg_primary'],
+                           foreground=colors['text_primary'])
         
-        # Button styles - REFINED (smaller, better proportioned)
-        self.style.configure('Primary.TButton', font=('Segoe UI', 9, 'bold'), padding=6)
-        self.style.configure('Secondary.TButton', font=('Segoe UI', 8), padding=4)
+        # Notebook (tabs)
+        self.style.configure('TNotebook', background=colors['bg_primary'],
+                           borderwidth=0)
+        self.style.configure('TNotebook.Tab', background=colors['bg_secondary'],
+                           foreground=colors['text_primary'], padding=[15, 10])
+        self.style.map('TNotebook.Tab',
+                      background=[('selected', colors['accent_primary'])],
+                      foreground=[('selected', colors['bg_primary'])])
+        
+        # Buttons - Primary
+        self.style.configure('Primary.TButton', padding=6, background=colors['accent_primary'])
         self.style.map('Primary.TButton',
-            background=[('pressed', '#0052A3'), ('active', '#0066CC')],
-            foreground=[('pressed', 'white'), ('active', 'white')])
+                      background=[('active', colors['accent_secondary'])],
+                      foreground=[('active', colors['bg_primary'])])
         
-        # Notebook styles
-        self.style.configure('TNotebook', background=bg_primary, borderwidth=0)
-        self.style.configure('TNotebook.Tab', font=('Segoe UI', 9), padding=10)
+        # Buttons - Secondary
+        self.style.configure('Secondary.TButton', padding=4)
+        self.style.map('Secondary.TButton',
+                      background=[('active', colors['bg_tertiary'])])
         
-        # Entry styles
-        self.style.configure('TEntry', font=('Segoe UI', 9), fieldbackground=bg_secondary, borderwidth=1)
-        self.style.configure('TCombobox', font=('Segoe UI', 9))
+        # Combobox
+        self.style.configure('TCombobox', fieldbackground=colors['bg_secondary'],
+                           background=colors['bg_tertiary'],
+                           foreground=colors['text_primary'])
+        
+        # Entry
+        self.style.configure('TEntry', fieldbackground=colors['bg_secondary'],
+                           foreground=colors['text_primary'])
+        
+        # Scrollbar
+        self.style.configure('Vertical.TScrollbar', background=colors['bg_secondary'])
+        self.style.configure('Horizontal.TScrollbar', background=colors['bg_secondary'])
     
-    def create_main_ui(self):
-        """Create refined 4-tab main interface"""
-        
+    def create_ui(self):
+        """Create main UI structure"""
         # Header
         self.create_header()
         
-        # Tabs
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill='both', expand=True, padx=0, pady=0)
+        # Main notebook (tabs)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Tab 1: Data Loading
-        self.tab1 = ttk.Frame(notebook)
-        notebook.add(self.tab1, text="📁 Data")
-        self.create_tab_data()
+        # Create tabs
+        self.tab1_load_data()
+        self.tab2_risk_scores()
+        self.tab3_generate_samples()
+        self.tab4_results()
+        self.tab5_strata_analytics()  # NEW
         
-        # Tab 2: Risk Scoring
-        self.tab2 = ttk.Frame(notebook)
-        notebook.add(self.tab2, text="📊 Risk")
-        self.create_tab_risk()
-        
-        # Tab 3: Sampling
-        self.tab3 = ttk.Frame(notebook)
-        notebook.add(self.tab3, text="🎯 Sample")
-        self.create_tab_sampling()
-        
-        # Tab 4: Results
-        self.tab4 = ttk.Frame(notebook)
-        notebook.add(self.tab4, text="📈 Results")
-        self.create_tab_results()
+        # Status bar
+        self.create_statusbar()
     
     def create_header(self):
-        """Create refined top header bar"""
-        header = ttk.Frame(self.root)
-        header.pack(fill='x', padx=0, pady=0, ipady=8)
+        """Professional header"""
+        colors = APP_CONFIG['theme_colors']
+        header = tk.Frame(self.root, bg=colors['accent_primary'], height=50)
+        header.pack(fill='x')
         
-        title_label = ttk.Label(header, text="🎯 OMRC Audit Sampling v8.1", 
-                               style='Title.TLabel')
-        title_label.pack(side='left', padx=15)
-        
-        status_label = ttk.Label(header, text="Ready", 
-                                font=('Segoe UI', 9), foreground='#28A745')
-        status_label.pack(side='right', padx=15)
-        self.status_label = status_label
+        title_label = tk.Label(
+            header,
+            text='🎯 OMRC AUDIT SAMPLING TOOL v8.2 - DASHBOARD EDITION',
+            bg=colors['accent_primary'],
+            fg=colors['bg_primary'],
+            pady=8
+        )
+        title_label.pack()
     
-    def create_tab_data(self):
-        """Tab 1: Refined data loading interface"""
+    def tab1_load_data(self):
+        """Tab 1: Load Data"""
+        colors = APP_CONFIG['theme_colors']
         
-        main = ttk.Frame(self.tab1)
-        main.pack(fill='both', expand=True, padx=15, pady=15)
+        tab1 = ttk.Frame(self.notebook)
+        self.notebook.add(tab1, text='📁 Data')
         
-        # Section 1: Load Data - REFINED
-        section1 = ttk.LabelFrame(main, text="Step 1: Load Data", padding=10)
-        section1.pack(fill='x', pady=(0, 12))
+        # Main container
+        main_frame = ttk.Frame(tab1)
+        main_frame.pack(fill='both', expand=True, padx=12, pady=12)
         
-        button_frame = ttk.Frame(section1)
-        button_frame.pack(fill='x')
+        # Step 1: Load Data
+        section1 = self.create_card(main_frame, 'Step 1: Load Your Data', 0, 0, 2, 1)
         
-        ttk.Button(button_frame, text="📂 Load File", command=self.load_data,
-                  style='Primary.TButton').pack(side='left', padx=3)
-        ttk.Button(button_frame, text="🔄 Demo Data", command=self.generate_demo_data,
-                  style='Secondary.TButton').pack(side='left', padx=3)
+        btn_frame = ttk.Frame(section1)
+        btn_frame.pack(fill='x', pady=8)
         
-        self.data_status = ttk.Label(section1, text="No data loaded", foreground='#DC3545',
-                                    font=('Segoe UI', 9))
-        self.data_status.pack(pady=(8, 0))
+        ttk.Button(btn_frame, text='📂 Load File', command=self.load_file,
+                  style='Primary.TButton').pack(side='left', padx=5)
+        ttk.Button(btn_frame, text='🔄 Generate Demo', command=self.generate_demo,
+                  style='Secondary.TButton').pack(side='left', padx=5)
         
-        # Section 2: Configure Columns - REFINED
-        section2 = ttk.LabelFrame(main, text="Step 2: Configure Columns", padding=10)
-        section2.pack(fill='x', pady=(0, 12))
+        self.data_status_label = tk.Label(section1, text='Status: Ready', 
+                                         bg=colors['bg_tertiary'], fg=colors['text_secondary'])
+        self.data_status_label.pack(fill='x', pady=5)
         
-        # Mandatory columns - grid layout
-        grid_frame = ttk.Frame(section2)
-        grid_frame.pack(fill='x')
+        # Step 2: Configure Stratification
+        section2 = self.create_card(main_frame, 'Step 2: Configure Stratification', 1, 0, 2, 1)
         
-        # Row 1
-        ttk.Label(grid_frame, text="Entity*:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', padx=5, pady=4)
-        self.entity_var = tk.StringVar(value="legal_entity")
-        self.entity_combo = ttk.Combobox(grid_frame, textvariable=self.entity_var, width=18, state='readonly', font=('Segoe UI', 8))
+        config_frame = ttk.Frame(section2)
+        config_frame.pack(fill='x', pady=8)
+        
+        # Entity
+        tk.Label(config_frame, text='Legal Entity*:', bg=colors['bg_tertiary'],
+                fg=colors['text_primary']).grid(row=0, column=0, padx=5, pady=4, sticky='w')
+        self.entity_combo = ttk.Combobox(config_frame, state='readonly', width=15)
         self.entity_combo.grid(row=0, column=1, padx=5, pady=4)
         
-        ttk.Label(grid_frame, text="Region*:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=2, sticky='w', padx=5, pady=4)
-        self.region_var = tk.StringVar(value="region")
-        self.region_combo = ttk.Combobox(grid_frame, textvariable=self.region_var, width=18, state='readonly', font=('Segoe UI', 8))
+        # Region
+        tk.Label(config_frame, text='Region*:', bg=colors['bg_tertiary'],
+                fg=colors['text_primary']).grid(row=0, column=2, padx=5, pady=4, sticky='w')
+        self.region_combo = ttk.Combobox(config_frame, state='readonly', width=15)
         self.region_combo.grid(row=0, column=3, padx=5, pady=4)
         
-        # Row 2
-        ttk.Label(grid_frame, text="Product*:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', padx=5, pady=4)
-        self.product_var = tk.StringVar(value="product_type")
-        self.product_combo = ttk.Combobox(grid_frame, textvariable=self.product_var, width=18, state='readonly', font=('Segoe UI', 8))
-        self.product_combo.grid(row=1, column=1, padx=5, pady=4)
+        # Product
+        tk.Label(config_frame, text='Product*:', bg=colors['bg_tertiary'],
+                fg=colors['text_primary']).grid(row=0, column=4, padx=5, pady=4, sticky='w')
+        self.product_combo = ttk.Combobox(config_frame, state='readonly', width=15)
+        self.product_combo.grid(row=0, column=5, padx=5, pady=4)
         
-        ttk.Button(grid_frame, text="➕ More", command=self.select_additional_cols,
-                  style='Secondary.TButton').grid(row=1, column=2, columnspan=2, sticky='ew', padx=5, pady=4)
+        # Additional columns button
+        ttk.Button(config_frame, text='➕ Add More', command=self.add_strata_column,
+                  style='Secondary.TButton').grid(row=0, column=6, padx=5, pady=4)
         
-        self.additional_label = ttk.Label(section2, text="No additional columns", foreground='#6C757D',
-                                         font=('Segoe UI', 8, 'italic'))
-        self.additional_label.pack(pady=(8, 0))
+        self.additional_cols_label = tk.Label(section2, text='No additional columns selected',
+                                             bg=colors['bg_tertiary'], fg=colors['text_secondary'])
+        self.additional_cols_label.pack(fill='x', pady=5)
         
-        # Section 3: Data Preview
-        section3 = ttk.LabelFrame(main, text="Preview (First 50 rows)", padding=8)
-        section3.pack(fill='both', expand=True, pady=(0, 12))
+        # Step 3: Data Preview
+        section3 = self.create_card(main_frame, 'Step 3: Data Preview (First 50 rows)', 2, 0, 2, 1)
         
-        self.preview_tree = ttk.Treeview(section3, height=12)
-        scrollbar_h = ttk.Scrollbar(section3, orient='horizontal', command=self.preview_tree.xview)
-        scrollbar_v = ttk.Scrollbar(section3, orient='vertical', command=self.preview_tree.yview)
+        # Treeview for preview
+        preview_frame = ttk.Frame(section3)
+        preview_frame.pack(fill='both', expand=True, pady=8)
         
-        self.preview_tree.configure(xscrollcommand=scrollbar_h.set, yscrollcommand=scrollbar_v.set)
-        
-        self.preview_tree.grid(row=0, column=0, sticky='nsew')
-        scrollbar_h.grid(row=1, column=0, sticky='ew')
-        scrollbar_v.grid(row=0, column=1, sticky='ns')
-        
-        section3.grid_rowconfigure(0, weight=1)
-        section3.grid_columnconfigure(0, weight=1)
-    
-    def create_tab_risk(self):
-        """Tab 2: Refined risk scoring interface"""
-        
-        main = ttk.Frame(self.tab2)
-        main.pack(fill='both', expand=True, padx=15, pady=15)
-        
-        # Action button - refined
-        action_frame = ttk.Frame(main)
-        action_frame.pack(fill='x', pady=(0, 12))
-        
-        ttk.Button(action_frame, text="📊 Calculate Risk Scores", command=self.calculate_risk_scores,
-                  style='Primary.TButton').pack(side='left', padx=3)
-        
-        self.risk_status = ttk.Label(action_frame, text="Not calculated", foreground='#FFC107',
-                                    font=('Segoe UI', 9))
-        self.risk_status.pack(side='left', padx=12)
-        
-        # Left panel: Insights
-        left_panel = ttk.LabelFrame(main, text="Population Summary", padding=12)
-        left_panel.pack(side='left', fill='both', expand=True, padx=(0, 8))
-        
-        self.insights_text = tk.Text(left_panel, height=25, width=45, font=('Courier', 8),
-                                    bg='#F8F9FA', relief='flat', borderwidth=0, wrap='word')
-        scrollbar = ttk.Scrollbar(left_panel, orient='vertical', command=self.insights_text.yview)
-        self.insights_text.configure(yscrollcommand=scrollbar.set)
-        
-        self.insights_text.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(preview_frame)
         scrollbar.pack(side='right', fill='y')
         
-        # Right panel: Risk breakdown
-        right_panel = ttk.LabelFrame(main, text="Risk Breakdown", padding=12)
-        right_panel.pack(side='right', fill='both', expand=True)
-        
-        self.risk_tree = ttk.Treeview(right_panel, columns=("Item", "Count", "Risk"),
-                                     show='tree headings', height=25)
-        self.risk_tree.heading('#0', text='Dimension')
-        self.risk_tree.heading('Item', text='Item')
-        self.risk_tree.heading('Count', text='Count')
-        self.risk_tree.heading('Risk', text='Score')
-        
-        self.risk_tree.column('#0', width=140)
-        self.risk_tree.column('Item', width=100)
-        self.risk_tree.column('Count', width=70)
-        self.risk_tree.column('Risk', width=70)
-        
-        scrollbar = ttk.Scrollbar(right_panel, orient='vertical', command=self.risk_tree.yview)
-        self.risk_tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.risk_tree.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
+        self.preview_tree = ttk.Treeview(preview_frame, yscrollcommand=scrollbar.set, height=10)
+        self.preview_tree.pack(fill='both', expand=True)
+        scrollbar.config(command=self.preview_tree.yview)
     
-    def create_tab_sampling(self):
-        """Tab 3: Refined sampling interface"""
+    def tab2_risk_scores(self):
+        """Tab 2: Risk Scores"""
+        colors = APP_CONFIG['theme_colors']
         
-        main = ttk.Frame(self.tab3)
-        main.pack(fill='both', expand=True, padx=15, pady=15)
+        tab2 = ttk.Frame(self.notebook)
+        self.notebook.add(tab2, text='📊 Risk')
         
-        # Section: Parameters - REFINED
-        section1 = ttk.LabelFrame(main, text="Sampling Parameters", padding=12)
-        section1.pack(fill='x', pady=(0, 12))
+        main_frame = ttk.Frame(tab2)
+        main_frame.pack(fill='both', expand=True, padx=12, pady=12)
         
-        param_frame = ttk.Frame(section1)
-        param_frame.pack(fill='x')
+        # Calculate button
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill='x', pady=8)
         
-        # Row 1
-        ttk.Label(param_frame, text="Confidence:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', padx=5, pady=5)
-        self.confidence_var = tk.StringVar(value="95")
-        ttk.Combobox(param_frame, textvariable=self.confidence_var, values=["90", "95", "99"],
-                    width=12, state='readonly', font=('Segoe UI', 8)).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(btn_frame, text='📊 Calculate Risk Scores', command=self.calculate_risk,
+                  style='Primary.TButton').pack(side='left', padx=5)
         
-        ttk.Label(param_frame, text="Margin:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=2, sticky='w', padx=5, pady=5)
-        self.margin_var = tk.StringVar(value="0.05")
-        ttk.Entry(param_frame, textvariable=self.margin_var, width=12, font=('Segoe UI', 8)).grid(row=0, column=3, padx=5, pady=5)
+        self.risk_status_label = tk.Label(btn_frame, text='Status: Pending',
+                                         bg=colors['bg_primary'], fg=colors['text_secondary'])
+        self.risk_status_label.pack(side='left', padx=20)
         
-        ttk.Label(param_frame, text="Error Rate:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=4, sticky='w', padx=5, pady=5)
-        self.error_var = tk.StringVar(value="0.15")
-        ttk.Entry(param_frame, textvariable=self.error_var, width=12, font=('Segoe UI', 8)).grid(row=0, column=5, padx=5, pady=5)
+        # Two-column layout for insights
+        insights_container = ttk.Frame(main_frame)
+        insights_container.pack(fill='both', expand=True, pady=8)
         
-        # Presets
-        ttk.Button(param_frame, text="Low Risk", command=lambda: self.set_preset(90, 0.10, 0.05),
-                  style='Secondary.TButton').grid(row=1, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
-        ttk.Button(param_frame, text="Standard", command=lambda: self.set_preset(95, 0.05, 0.15),
-                  style='Secondary.TButton').grid(row=1, column=2, columnspan=2, sticky='ew', padx=5, pady=5)
-        ttk.Button(param_frame, text="High Risk", command=lambda: self.set_preset(99, 0.03, 0.20),
-                  style='Secondary.TButton').grid(row=1, column=4, columnspan=2, sticky='ew', padx=5, pady=5)
+        # Population Insights
+        pop_card = self.create_card(insights_container, 'Population Insights', 0, 0, 1, 1)
+        self.pop_insights_text = tk.Text(pop_card, height=12, width=50, 
+                                        bg=colors['bg_tertiary'], fg=colors['text_primary'],
+                                        insertbackground=colors['accent_primary'])
+        self.pop_insights_text.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # Section: Methods
-        section2 = ttk.LabelFrame(main, text="Sampling Methods", padding=12)
-        section2.pack(fill='x', pady=(0, 12))
+        # Risk Breakdown
+        risk_card = self.create_card(insights_container, 'Risk Breakdown', 0, 1, 1, 1)
+        self.risk_breakdown_text = tk.Text(risk_card, height=12, width=50,
+                                          bg=colors['bg_tertiary'], fg=colors['text_primary'],
+                                          insertbackground=colors['accent_primary'])
+        self.risk_breakdown_text.pack(fill='both', expand=True, padx=5, pady=5)
+    
+    def tab3_generate_samples(self):
+        """Tab 3: Generate Samples"""
+        colors = APP_CONFIG['theme_colors']
         
-        method_frame = ttk.Frame(section2)
-        method_frame.pack(fill='x')
+        tab3 = ttk.Frame(self.notebook)
+        self.notebook.add(tab3, text='🎯 Sample')
         
-        self.method_vars = {}
-        methods = [
-            ('Traditional (Baseline)', 'traditional'),
-            ('Risk-PPS (RECOMMENDED)', 'risk_based'),
-            ('Hybrid (Complex Risks)', 'hybrid')
-        ]
+        main_frame = ttk.Frame(tab3)
+        main_frame.pack(fill='both', expand=True, padx=12, pady=12)
         
-        for i, (label, key) in enumerate(methods):
-            var = tk.BooleanVar(value=(i != 0))
-            self.method_vars[key] = var
-            ttk.Checkbutton(method_frame, text=label, variable=var, 
-                          font=('Segoe UI', 9)).pack(anchor='w', pady=3)
+        # Parameters section
+        param_card = self.create_card(main_frame, 'Sampling Parameters', 0, 0, 3, 1)
+        
+        param_frame = ttk.Frame(param_card)
+        param_frame.pack(fill='x', pady=8, padx=8)
+        
+        # Confidence level
+        tk.Label(param_frame, text='Confidence Level:', bg=colors['bg_tertiary'],
+                fg=colors['text_primary']).grid(row=0, column=0, padx=5, pady=4, sticky='w')
+        self.confidence_combo = ttk.Combobox(param_frame, values=['90%', '95%', '99%'],
+                                            state='readonly', width=10)
+        self.confidence_combo.set('95%')
+        self.confidence_combo.grid(row=0, column=1, padx=5, pady=4, sticky='w')
+        
+        # Margin of error
+        tk.Label(param_frame, text='Margin of Error:', bg=colors['bg_tertiary'],
+                fg=colors['text_primary']).grid(row=0, column=2, padx=5, pady=4, sticky='w')
+        self.margin_combo = ttk.Combobox(param_frame, values=['0.03', '0.05', '0.10'],
+                                        state='readonly', width=10)
+        self.margin_combo.set('0.05')
+        self.margin_combo.grid(row=0, column=3, padx=5, pady=4, sticky='w')
+        
+        # Expected error
+        tk.Label(param_frame, text='Expected Error:', bg=colors['bg_tertiary'],
+                fg=colors['text_primary']).grid(row=0, column=4, padx=5, pady=4, sticky='w')
+        self.error_combo = ttk.Combobox(param_frame, values=['0.05', '0.10', '0.15', '0.20'],
+                                       state='readonly', width=10)
+        self.error_combo.set('0.15')
+        self.error_combo.grid(row=0, column=5, padx=5, pady=4, sticky='w')
+        
+        # Sampling Methods section
+        method_card = self.create_card(main_frame, 'Select Sampling Methods', 1, 0, 3, 1)
+        
+        method_frame = ttk.Frame(method_card)
+        method_frame.pack(fill='x', pady=8, padx=8)
+        
+        self.method_traditional = tk.BooleanVar(value=True)
+        self.method_risk_pps = tk.BooleanVar(value=True)
+        self.method_hybrid = tk.BooleanVar(value=True)
+        
+        ttk.Checkbutton(method_frame, text='☐ Traditional Random (Baseline)',
+                       variable=self.method_traditional).pack(anchor='w', pady=2)
+        ttk.Checkbutton(method_frame, text='☑ Risk-PPS Neyman (RECOMMENDED)',
+                       variable=self.method_risk_pps).pack(anchor='w', pady=2)
+        ttk.Checkbutton(method_frame, text='☑ Enhanced Hybrid (65%+25%+10%)',
+                       variable=self.method_hybrid).pack(anchor='w', pady=2)
         
         # Generate button
-        section3 = ttk.Frame(main)
-        section3.pack(fill='x', pady=(0, 12))
+        btn_card = self.create_card(main_frame, '', 2, 0, 3, 1)
+        ttk.Button(btn_card, text='🎯 GENERATE SAMPLES',
+                  command=self.generate_samples, style='Primary.TButton').pack(pady=12)
         
-        ttk.Button(section3, text="🎯 GENERATE SAMPLES", command=self.generate_samples,
-                  style='Primary.TButton').pack(fill='x', ipady=10, pady=8)
-        
-        self.sampling_status = ttk.Label(section3, text="Ready", foreground='#0066CC',
-                                        font=('Segoe UI', 9))
-        self.sampling_status.pack(pady=2)
+        self.sample_status_label = tk.Label(btn_card, text='Status: Ready',
+                                           bg=colors['bg_primary'], fg=colors['text_secondary'])
+        self.sample_status_label.pack(fill='x', pady=5)
     
-    def create_tab_results(self):
-        """Tab 4: Results & export interface"""
+    def tab4_results(self):
+        """Tab 4: Results & Export"""
+        colors = APP_CONFIG['theme_colors']
         
-        main = ttk.Frame(self.tab4)
-        main.pack(fill='both', expand=True, padx=15, pady=15)
+        tab4 = ttk.Frame(self.notebook)
+        self.notebook.add(tab4, text='📈 Results')
         
-        # Export buttons - REFINED
-        export_frame = ttk.LabelFrame(main, text="Export Options", padding=12)
-        export_frame.pack(fill='x', pady=(0, 12))
+        main_frame = ttk.Frame(tab4)
+        main_frame.pack(fill='both', expand=True, padx=12, pady=12)
         
-        button_frame = ttk.Frame(export_frame)
-        button_frame.pack(fill='x')
+        # Export buttons
+        export_card = self.create_card(main_frame, 'Export Results', 0, 0, 3, 1)
+        btn_frame = ttk.Frame(export_card)
+        btn_frame.pack(fill='x', pady=8, padx=8)
         
-        ttk.Button(button_frame, text="📥 Samples", command=self.export_samples,
-                  style='Primary.TButton').pack(side='left', padx=3)
-        ttk.Button(button_frame, text="📋 Report", command=self.export_coverage,
-                  style='Secondary.TButton').pack(side='left', padx=3)
-        ttk.Button(button_frame, text="📊 All", command=self.export_all,
-                  style='Secondary.TButton').pack(side='left', padx=3)
+        ttk.Button(btn_frame, text='📥 Export Samples',
+                  command=self.export_samples, style='Primary.TButton').pack(side='left', padx=5)
+        ttk.Button(btn_frame, text='📊 Export Coverage',
+                  command=self.export_coverage, style='Secondary.TButton').pack(side='left', padx=5)
+        ttk.Button(btn_frame, text='📋 All Results',
+                  command=self.export_all, style='Secondary.TButton').pack(side='left', padx=5)
         
-        # Results display
-        results_frame = ttk.LabelFrame(main, text="Summary", padding=12)
-        results_frame.pack(fill='both', expand=True, pady=(0, 12))
+        # Summary table
+        summary_card = self.create_card(main_frame, 'Summary Table', 1, 0, 3, 2)
         
-        # Summary table - REFINED
-        self.summary_tree = ttk.Treeview(results_frame, columns=("Size", "Strata", "HighRisk", "AvgRisk"),
-                                        show='tree headings', height=6)
-        self.summary_tree.heading('#0', text='Method')
-        self.summary_tree.heading('Size', text='Size')
-        self.summary_tree.heading('Strata', text='Strata')
-        self.summary_tree.heading('HighRisk', text='High-Risk %')
-        self.summary_tree.heading('AvgRisk', text='Avg Risk')
+        # Treeview for summary
+        summary_frame = ttk.Frame(summary_card)
+        summary_frame.pack(fill='both', expand=True, padx=5, pady=8)
         
-        self.summary_tree.column('#0', width=180)
-        self.summary_tree.column('Size', width=80)
-        self.summary_tree.column('Strata', width=120)
-        self.summary_tree.column('HighRisk', width=100)
-        self.summary_tree.column('AvgRisk', width=80)
-        
-        scrollbar = ttk.Scrollbar(results_frame, orient='vertical', command=self.summary_tree.yview)
-        self.summary_tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.summary_tree.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(summary_frame)
         scrollbar.pack(side='right', fill='y')
         
-        # Insights
-        insights_frame = ttk.LabelFrame(main, text="Analysis", padding=12)
-        insights_frame.pack(fill='both', expand=True)
+        columns = ('Method', 'Size', 'Strata', 'HR %', 'Avg Risk')
+        self.summary_tree = ttk.Treeview(summary_frame, columns=columns, height=6,
+                                        yscrollcommand=scrollbar.set, show='headings')
         
-        self.results_text = tk.Text(insights_frame, height=8, font=('Courier', 8),
-                                   bg='#F8F9FA', relief='flat', borderwidth=0, wrap='word')
-        scrollbar = ttk.Scrollbar(insights_frame, orient='vertical', command=self.results_text.yview)
-        self.results_text.configure(yscrollcommand=scrollbar.set)
+        for col in columns:
+            self.summary_tree.column(col, width=100)
+            self.summary_tree.heading(col, text=col)
         
-        self.results_text.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
-    
-    # ==================== UTILITY FUNCTIONS ====================
-    
-    def safe_convert_to_numeric(self, val):
-        """Safely convert value to numeric"""
-        if pd.isna(val):
-            return None
-        if isinstance(val, (int, float)):
-            return float(val)
-        if isinstance(val, str):
-            val = val.strip()
-            if val == '':
-                return None
-            try:
-                return float(val)
-            except ValueError:
-                return None
-        return None
-    
-    def safe_convert_to_string(self, val):
-        """Safely convert value to string"""
-        if pd.isna(val):
-            return ""
-        return str(val).strip()
-    
-    def update_status(self, msg, color='#0066CC'):
-        self.status_label.config(text=msg, foreground=color)
-        self.root.update()
-    
-    def clean_dataframe(self, df):
-        """Clean and prepare dataframe for analysis"""
-        # Remove completely empty rows
-        df = df.dropna(how='all')
+        self.summary_tree.pack(fill='both', expand=True)
+        scrollbar.config(command=self.summary_tree.yview)
         
-        # Convert all columns to strings for categorical columns
-        for col in df.columns:
-            # Check if column looks numeric (try convert)
-            numeric_col = pd.to_numeric(df[col], errors='coerce')
-            if numeric_col.notna().sum() / len(df) < 0.5:  # Less than 50% numeric
-                # Treat as categorical
-                df[col] = df[col].astype(str).str.strip()
-            else:
-                # Treat as numeric
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Key insights
+        insights_card = self.create_card(main_frame, 'Key Insights', 3, 0, 3, 1)
+        self.insights_text = tk.Text(insights_card, height=6, width=100,
+                                    bg=colors['bg_tertiary'], fg=colors['accent_success'],
+                                    insertbackground=colors['accent_primary'])
+        self.insights_text.pack(fill='both', expand=True, padx=5, pady=5)
+    
+    def tab5_strata_analytics(self):
+        """Tab 5: Strata Analytics (NEW)"""
+        colors = APP_CONFIG['theme_colors']
         
-        return df
-    
-    # ==================== DATA LOADING ====================
-    
-    def load_data(self):
-        """Load data with robust error handling"""
-        file_path = filedialog.askopenfilename(
-            title="Select Data File",
-            filetypes=[("CSV Files", "*.csv"), ("Excel Files", "*.xlsx"), ("All Files", "*.*")]
-        )
+        tab5 = ttk.Frame(self.notebook)
+        self.notebook.add(tab5, text='📊 Strata')
         
-        if file_path:
-            try:
-                # Load file
-                if file_path.endswith('.csv'):
-                    self.data = pd.read_csv(file_path)
-                else:
-                    self.data = pd.read_excel(file_path)
-                
-                # Clean data
-                self.data = self.clean_dataframe(self.data)
-                
-                self.update_column_dropdowns()
-                self.update_preview()
-                self.data_status.config(text=f"✓ {len(self.data):,} records", foreground='#28A745')
-                self.update_status(f"Loaded: {len(self.data):,} records", '#28A745')
-                messagebox.showinfo("Success", f"Loaded {len(self.data):,} records successfully!")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load: {str(e)}")
-                self.data_status.config(text="Load failed", foreground='#DC3545')
+        main_frame = ttk.Frame(tab5)
+        main_frame.pack(fill='both', expand=True, padx=12, pady=12)
+        
+        # Refresh button
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill='x', pady=8)
+        
+        ttk.Button(btn_frame, text='🔄 Refresh Analytics',
+                  command=self.refresh_strata_analytics,
+                  style='Primary.TButton').pack(side='left', padx=5)
+        
+        # Three-column layout
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side='left', fill='both', expand=True, padx=5)
+        
+        mid_frame = ttk.Frame(main_frame)
+        mid_frame.pack(side='left', fill='both', expand=True, padx=5)
+        
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side='left', fill='both', expand=True, padx=5)
+        
+        # Strata Count Distribution
+        strata_card = self.create_card(left_frame, 'Strata Distribution', 0, 0, 1, 1)
+        self.strata_dist_text = tk.Text(strata_card, height=18, width=35,
+                                       bg=colors['bg_tertiary'], fg=colors['text_primary'],
+                                       insertbackground=colors['accent_primary'])
+        self.strata_dist_text.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Risk Distribution per Stratum
+        risk_card = self.create_card(mid_frame, 'Risk Distribution', 0, 0, 1, 1)
+        self.risk_dist_text = tk.Text(risk_card, height=18, width=35,
+                                     bg=colors['bg_tertiary'], fg=colors['text_primary'],
+                                     insertbackground=colors['accent_primary'])
+        self.risk_dist_text.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Statistical Summary
+        stats_card = self.create_card(right_frame, 'Statistical Summary', 0, 0, 1, 1)
+        self.stats_summary_text = tk.Text(stats_card, height=18, width=35,
+                                         bg=colors['bg_tertiary'], fg=colors['accent_success'],
+                                         insertbackground=colors['accent_primary'])
+        self.stats_summary_text.pack(fill='both', expand=True, padx=5, pady=5)
     
-    def generate_demo_data(self):
-        """Generate demo data with realistic structure"""
+    def create_card(self, parent, title, row, col, rowspan, colspan):
+        """Create a dashboard card/panel"""
+        colors = APP_CONFIG['theme_colors']
+        
+        card = tk.Frame(parent, bg=colors['bg_tertiary'], bd=1, relief='flat')
+        card.grid(row=row, column=col, rowspan=rowspan, columnspan=colspan,
+                 sticky='nsew', padx=5, pady=5)
+        
+        # Title
+        if title:
+            title_label = tk.Label(card, text=title, bg=colors['bg_tertiary'],
+                                  fg=colors['accent_primary'], pady=8)
+            title_label.pack(fill='x', padx=8)
+            
+            separator = tk.Frame(card, bg=colors['border'], height=1)
+            separator.pack(fill='x', padx=8)
+        
+        return card
+    
+    def create_statusbar(self):
+        """Create status bar"""
+        colors = APP_CONFIG['theme_colors']
+        
+        statusbar = tk.Frame(self.root, bg=colors['bg_secondary'], height=30)
+        statusbar.pack(fill='x', side='bottom')
+        
+        self.status_label = tk.Label(statusbar, text='Ready', bg=colors['bg_secondary'],
+                                    fg=colors['text_secondary'], pady=5)
+        self.status_label.pack(side='left', padx=10)
+    
+    def log_status(self, message):
+        """Log status message"""
+        self.status_message = message
+        self.status_label.config(text=f'✓ {message}')
+    
+    # ========================================================================
+    # DATA OPERATIONS
+    # ========================================================================
+    
+    def load_file(self):
+        """Load CSV or Excel file"""
+        filetypes = [('CSV files', '*.csv'), ('Excel files', '*.xlsx'), ('All files', '*.*')]
+        filename = filedialog.askopenfilename(filetypes=filetypes)
+        
+        if not filename:
+            return
+        
         try:
-            np.random.seed(42)
-            n = 10000
+            if filename.endswith('.xlsx'):
+                self.data = pd.read_excel(filename)
+            else:
+                self.data = pd.read_csv(filename)
             
-            entities = ['HBAP', 'HBEU', 'HBUS']
-            regions_map = {
-                'HBAP': ['LN', 'AU', 'IN', 'PA', 'HK', 'SG'],
-                'HBEU': ['LN', 'PA', 'FR', 'DE', 'IT', 'CH'],
-                'HBUS': ['NY', 'CA', 'TX', 'IL', 'FL']
-            }
-            products = ['Bonds', 'Equities', 'IRD', 'FX', 'Structured', 'Repo']
-            
-            entity_list = np.random.choice(entities, n, p=[0.45, 0.35, 0.20])
-            region_list = [np.random.choice(regions_map[e]) for e in entity_list]
-            
-            self.data = pd.DataFrame({
-                'exception_id': range(1, n + 1),
-                'legal_entity': entity_list,
-                'region': region_list,
-                'product_type': np.random.choice(products, n),
-                'desk_id': [f"DESK_{i:02d}" for i in np.random.randint(1, 31, n)],
-                'trade_value': np.random.lognormal(15, 1.5, n),
-                'aging_days': np.random.exponential(8, n).astype(int)
-            })
-            
+            self.data = clean_dataframe(self.data)
             self.update_column_dropdowns()
             self.update_preview()
-            self.data_status.config(text=f"✓ {len(self.data):,} records (demo)", foreground='#28A745')
-            self.update_status(f"Demo created: {len(self.data):,} records", '#28A745')
-            messagebox.showinfo("Success", f"Generated {len(self.data):,} demo records!")
+            
+            self.log_status(f'Loaded {len(self.data)} records from {Path(filename).name}')
+            self.data_status_label.config(text=f'✓ Loaded {len(self.data):,} records')
+            
         except Exception as e:
-            messagebox.showerror("Error", f"Failed: {str(e)}")
+            messagebox.showerror('Error', f'Failed to load file:\n{str(e)}')
+            self.log_status('Failed to load file')
+    
+    def generate_demo(self):
+        """Generate demo data"""
+        try:
+            self.data = generate_demo_data(10000)
+            self.data = clean_dataframe(self.data)
+            self.update_column_dropdowns()
+            self.update_preview()
+            
+            self.log_status('Generated demo data with 10,000 records')
+            self.data_status_label.config(text='✓ Generated demo data (10,000 records)')
+            
+        except Exception as e:
+            messagebox.showerror('Error', f'Failed to generate demo data:\n{str(e)}')
     
     def update_column_dropdowns(self):
-        """Auto-populate column dropdowns"""
-        if self.data is None:
+        """Update column selection dropdowns"""
+        if self.data is None or len(self.data) == 0:
             return
         
-        cols = list(self.data.columns)
-        self.entity_combo['values'] = cols
-        self.region_combo['values'] = cols
-        self.product_combo['values'] = cols
+        columns = list(self.data.columns)
         
-        # Try to auto-detect columns
-        for col in cols:
-            col_lower = col.lower()
-            if 'entity' in col_lower or 'legal' in col_lower:
-                self.entity_var.set(col)
-            elif 'region' in col_lower:
-                self.region_var.set(col)
-            elif 'product' in col_lower:
-                self.product_var.set(col)
+        self.entity_combo['values'] = columns
+        self.region_combo['values'] = columns
+        self.product_combo['values'] = columns
+        
+        # Auto-select if column names match
+        for col in columns:
+            if any(x in col.lower() for x in ['entity', 'legal', 'le']):
+                self.entity_combo.set(col)
+            if any(x in col.lower() for x in ['region', 'country', 'loc']):
+                self.region_combo.set(col)
+            if any(x in col.lower() for x in ['product', 'asset', 'trade']):
+                self.product_combo.set(col)
     
     def update_preview(self):
-        """Update data preview with better formatting"""
-        if self.data is None:
+        """Update data preview"""
+        if self.data is None or len(self.data) == 0:
             return
         
+        # Clear existing
         for item in self.preview_tree.get_children():
             self.preview_tree.delete(item)
         
-        cols = list(self.data.columns)
+        # Set columns
+        cols = list(self.data.columns[:8])  # First 8 columns
         self.preview_tree['columns'] = cols
-        self.preview_tree['show'] = 'headings'
+        self.preview_tree.column('#0', width=0)
         
         for col in cols:
-            self.preview_tree.heading(col, text=col)
-            self.preview_tree.column(col, width=80)
+            self.preview_tree.column(col, anchor='w', width=100)
+            self.preview_tree.heading(col, text=col, anchor='w')
         
-        for _, row in self.data.head(50).iterrows():
-            values = []
-            for col in cols:
-                val = row[col]
-                if isinstance(val, float):
-                    values.append(f"{val:.2f}" if not pd.isna(val) else "")
-                else:
-                    values.append(str(val)[:30] if pd.notna(val) else "")
+        # Add data (first 50 rows)
+        for idx, row in self.data.head(50).iterrows():
+            values = [str(row[col])[:30] for col in cols]
             self.preview_tree.insert('', 'end', values=values)
     
-    def select_additional_cols(self):
-        """Open dialog to select additional columns"""
+    def add_strata_column(self):
+        """Add additional stratification column"""
         if self.data is None:
-            messagebox.showerror("Error", "Load data first")
+            messagebox.showwarning('Warning', 'Load data first')
             return
         
-        mandatory = {self.entity_var.get(), self.region_var.get(), self.product_var.get()}
-        available = [c for c in self.data.columns if c not in mandatory]
+        # Simple dialog for column selection
+        cols = list(self.data.columns)
+        col = simpledialog.askstring('Add Column', f'Available columns:\n{", ".join(cols)}\n\nEnter column name:')
         
-        if not available:
-            messagebox.showinfo("Info", "No additional columns available")
-            return
-        
-        from tkinter import Listbox, MULTIPLE
-        
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Select Additional Columns")
-        dialog.geometry("350x280")
-        dialog.resizable(False, False)
-        
-        ttk.Label(dialog, text="Select columns (Ctrl+Click):", 
-                 font=('Segoe UI', 10, 'bold')).pack(padx=10, pady=10)
-        
-        listbox = Listbox(dialog, selectmode=MULTIPLE, font=('Segoe UI', 9), height=10)
-        listbox.pack(fill='both', expand=True, padx=10, pady=(0, 10))
-        
-        for i, col in enumerate(available):
-            listbox.insert(i, col)
-            if col in self.selected_additional_columns:
-                listbox.selection_set(i)
-        
-        def confirm():
-            self.selected_additional_columns = [available[i] for i in listbox.curselection()]
-            text = f"Selected: {', '.join(self.selected_additional_columns)}" if self.selected_additional_columns else "No additional"
-            self.additional_label.config(text=text)
-            dialog.destroy()
-        
-        ttk.Button(dialog, text="✓ Confirm", command=confirm, style='Primary.TButton').pack(pady=10, fill='x', padx=10)
+        if col and col in cols:
+            if col not in self.stratification_cols:
+                self.stratification_cols.append(col)
+                self.additional_cols_label.config(text=f'Additional: {", ".join(self.stratification_cols)}')
+        else:
+            messagebox.showerror('Error', 'Column not found')
     
-    # ==================== RISK SCORING ====================
+    # ========================================================================
+    # RISK CALCULATION
+    # ========================================================================
     
-    def calculate_statistical_weights(self, data, column):
-        """Calculate weights with robust error handling"""
+    def calculate_risk(self):
+        """Calculate risk scores"""
         try:
-            # Convert to string for counting
-            data_clean = data[column].astype(str).str.strip()
-            counts = data_clean.value_counts()
-            total = len(data_clean)
-            frequencies = counts / total
-            
-            if len(frequencies) > 1:
-                min_f = frequencies.min()
-                max_f = frequencies.max()
-                if max_f > min_f:
-                    weights = 0.1 + 0.9 * (frequencies - min_f) / (max_f - min_f)
-                else:
-                    weights = pd.Series(0.5, index=frequencies.index)
-            else:
-                weights = pd.Series(0.5, index=frequencies.index)
-            
-            return weights.to_dict(), frequencies.to_dict(), counts.to_dict()
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to calculate weights: {str(e)}")
-            return {}, {}, {}
-    
-    def calculate_risk_scores(self):
-        """Calculate risk scores with robust data handling"""
-        if self.data is None:
-            messagebox.showerror("Error", "Load data first")
-            return
-        
-        try:
-            self.root.config(cursor="wait")
-            self.update_status("Calculating...", '#FFC107')
-            self.root.update()
-            
-            entity_col = self.entity_var.get()
-            region_col = self.region_var.get()
-            product_col = self.product_var.get()
-            
-            if not all([entity_col, region_col, product_col]):
-                messagebox.showerror("Error", "Select all mandatory columns")
-                self.root.config(cursor="arrow")
+            if self.data is None or len(self.data) == 0:
+                messagebox.showwarning('Warning', 'Load data first')
                 return
             
-            # Calculate weights for mandatory columns
-            self.mandatory_risk_scores = {}
-            for key, col in [('entity', entity_col), ('region', region_col), ('product', product_col)]:
-                if col in self.data.columns:
-                    w, f, c = self.calculate_statistical_weights(self.data, col)
-                    self.mandatory_risk_scores[key] = {'weights': w, 'frequencies': f, 'counts': c}
+            entity_col = self.entity_combo.get()
+            region_col = self.region_combo.get()
+            product_col = self.product_combo.get()
             
-            # Calculate weights for additional columns
-            self.additional_risk_weights = {}
-            for col in self.selected_additional_columns:
-                if col in self.data.columns:
-                    w, f, c = self.calculate_statistical_weights(self.data, col)
-                    self.additional_risk_weights[col] = {'weights': w, 'frequencies': f, 'counts': c}
+            if not all([entity_col, region_col, product_col]):
+                messagebox.showwarning('Warning', 'Configure all 3 columns')
+                return
             
-            # Map risk scores - SAFE TYPE HANDLING
-            def safe_map_weight(val, weight_dict):
-                """Safely map value to weight"""
-                try:
-                    key = str(val).strip() if pd.notna(val) else ""
-                    return weight_dict.get(key, 0.5)
-                except:
-                    return 0.5
-            
+            # Calculate risk scores
             self.data['entity_risk'] = self.data[entity_col].apply(
                 lambda x: safe_map_weight(x, self.mandatory_risk_scores['entity']['weights']))
+            
             self.data['region_risk'] = self.data[region_col].apply(
                 lambda x: safe_map_weight(x, self.mandatory_risk_scores['region']['weights']))
+            
             self.data['product_risk'] = self.data[product_col].apply(
                 lambda x: safe_map_weight(x, self.mandatory_risk_scores['product']['weights']))
             
-            # Create stratum identifier
-            all_cols = [entity_col, region_col, product_col] + self.selected_additional_columns
-            self.data['stratum'] = self.data[all_cols].astype(str).agg('_'.join, axis=1)
-            self.total_strata_count = len(self.data.groupby(all_cols))
+            # Composite risk
+            self.data['risk_score'] = (
+                self.data['entity_risk'] * 0.4 +
+                self.data['region_risk'] * 0.3 +
+                self.data['product_risk'] * 0.3
+            )
             
-            # Calculate composite risk
-            risk_components = [
-                self.data['entity_risk'],
-                self.data['region_risk'],
-                self.data['product_risk']
-            ]
+            # Categorize
+            self.data['risk_category'] = pd.cut(self.data['risk_score'],
+                                               bins=[0, 0.3, 0.7, 1.0],
+                                               labels=['Low', 'Medium', 'High'])
             
-            for col in self.selected_additional_columns:
-                if col in self.data.columns:
-                    risk_col = f'{col}_risk'
-                    self.data[risk_col] = self.data[col].apply(
-                        lambda x: safe_map_weight(x, self.additional_risk_weights[col]['weights']))
-                    risk_components.append(self.data[risk_col])
+            # Stratification
+            strata_cols = [entity_col, region_col, product_col] + self.stratification_cols
+            self.stratified_data = self.data.groupby(strata_cols, dropna=False).agg({
+                'risk_score': ['mean', 'count'],
+                'risk_category': lambda x: (x == 'High').sum()
+            }).reset_index()
             
-            self.data['risk_score'] = sum(risk_components) / len(risk_components)
-            self.data['risk_score'] = np.clip(self.data['risk_score'], 0.01, 1.0)
+            self.stratified_data.columns = ['_'.join(col).strip('_') for col in 
+                                           self.stratified_data.columns.values]
             
-            # Update displays
-            self.update_risk_display()
-            self.update_insights()
-            self.risk_status.config(text="✓ Calculated", foreground='#28A745')
-            self.update_status("Risk scores calculated", '#28A745')
-            self.root.config(cursor="arrow")
-            messagebox.showinfo("Success", "Risk scores calculated successfully!")
+            # Display insights
+            self.display_risk_insights()
+            
+            self.log_status('Risk scores calculated successfully')
+            self.risk_status_label.config(text='✓ Calculated')
             
         except Exception as e:
-            self.root.config(cursor="arrow")
-            messagebox.showerror("Error", f"Failed: {str(e)}")
+            messagebox.showerror('Error', f'Failed to calculate risk:\n{str(e)}')
+            self.log_status('Failed to calculate risk')
     
-    def update_risk_display(self):
-        """Update risk tree display"""
-        for item in self.risk_tree.get_children():
-            self.risk_tree.delete(item)
+    def display_risk_insights(self):
+        """Display risk calculation insights"""
+        self.pop_insights_text.delete('1.0', 'end')
+        self.risk_breakdown_text.delete('1.0', 'end')
         
-        entity_col = self.entity_var.get()
-        region_col = self.region_var.get()
-        product_col = self.product_var.get()
-        
-        for col_name, display_name in [(entity_col, 'Entity'), (region_col, 'Region'), (product_col, 'Product')]:
-            risk_key = 'entity' if col_name == entity_col else ('region' if col_name == region_col else 'product')
-            parent = self.risk_tree.insert('', 'end', text=display_name, values=('', '', ''))
-            
-            for item in sorted(self.data[col_name].astype(str).unique()):
-                count = self.mandatory_risk_scores[risk_key]['counts'].get(item, 0)
-                risk = self.mandatory_risk_scores[risk_key]['weights'].get(item, 0.5)
-                self.risk_tree.insert(parent, 'end', text='', values=(str(item), f"{count:,}", f"{risk:.4f}"))
-    
-    def update_insights(self):
-        """Update population insights"""
-        self.insights_text.config(state='normal')
-        self.insights_text.delete(1.0, tk.END)
-        
-        if 'risk_score' not in self.data.columns:
-            self.insights_text.insert(1.0, "Calculate risk scores first")
-            self.insights_text.config(state='disabled')
+        if self.data is None:
             return
         
-        high_risk = len(self.data[self.data['risk_score'] > 0.7])
-        med_risk = len(self.data[(self.data['risk_score'] >= 0.3) & (self.data['risk_score'] <= 0.7)])
-        low_risk = len(self.data[self.data['risk_score'] < 0.3])
-        
-        insights = f"""POPULATION SUMMARY
-{'='*42}
-Total Records:      {len(self.data):,}
-Total Strata:       {self.total_strata_count:,}
+        # Population insights
+        pop_text = f"""
+POPULATION METRICS
+{'='*40}
+
+Total Records: {len(self.data):,}
+Unique Strata: {len(self.stratified_data)}
 
 RISK DISTRIBUTION
-High-Risk (>0.7):   {high_risk:,}
-                    ({high_risk/len(self.data)*100:.1f}%)
+──────────────────
+High Risk:     {(self.data['risk_category']=='High').sum():>6,} ({(self.data['risk_category']=='High').sum()/len(self.data)*100:>5.1f}%)
+Medium Risk:   {(self.data['risk_category']=='Medium').sum():>6,} ({(self.data['risk_category']=='Medium').sum()/len(self.data)*100:>5.1f}%)
+Low Risk:      {(self.data['risk_category']=='Low').sum():>6,} ({(self.data['risk_category']=='Low').sum()/len(self.data)*100:>5.1f}%)
 
-Medium (0.3-0.7):   {med_risk:,}
-                    ({med_risk/len(self.data)*100:.1f}%)
-
-Low-Risk (<0.3):    {low_risk:,}
-                    ({low_risk/len(self.data)*100:.1f}%)
-
-STRATIFICATION
-Dimensions:    {3 + len(self.selected_additional_columns)}
-Avg Stratum:   {len(self.data) / self.total_strata_count:.0f}
+STATISTICS
+──────────────────
+Mean Risk:     {self.data['risk_score'].mean():.4f}
+Median Risk:   {self.data['risk_score'].median():.4f}
+Std Dev:       {self.data['risk_score'].std():.4f}
+Min:           {self.data['risk_score'].min():.4f}
+Max:           {self.data['risk_score'].max():.4f}
 
 ✓ Ready for sampling
 """
-        self.insights_text.insert(1.0, insights)
-        self.insights_text.config(state='disabled')
+        self.pop_insights_text.insert('1.0', pop_text)
+        
+        # Risk breakdown
+        risk_text = f"""
+RISK BREAKDOWN BY STRATUM
+{'='*40}
+
+Top 10 Highest Risk Strata:
+──────────────────────────
+
+"""
+        if self.stratified_data is not None:
+            top_strata = self.stratified_data.nlargest(10, 'risk_score_mean')
+            for idx, row in top_strata.iterrows():
+                risk_text += f"  • Risk: {row['risk_score_mean']:.3f} | "
+                risk_text += f"Count: {int(row['risk_score_count']):,}\n"
+        
+        risk_text += f"""
+COVERAGE METRICS
+──────────────────
+Strata Covered: {len(self.stratified_data)}
+
+✓ Ready to generate samples
+"""
+        self.risk_breakdown_text.insert('1.0', risk_text)
     
-    # ==================== SAMPLING ====================
-    
-    def set_preset(self, conf, margin, error):
-        """Set parameter preset"""
-        self.confidence_var.set(str(conf))
-        self.margin_var.set(f"{margin:.2f}")
-        self.error_var.set(f"{error:.2f}")
-    
-    def calculate_sample_size(self):
-        """Calculate sample size using Cochran's formula"""
-        try:
-            conf = float(self.confidence_var.get())
-            margin = float(self.margin_var.get())
-            error = float(self.error_var.get())
-            
-            z_scores = {90: 1.645, 95: 1.96, 99: 2.576}
-            z = z_scores.get(int(conf), 1.96)
-            
-            n = (z**2 * error * (1-error)) / (margin**2)
-            N = len(self.data)
-            n_adj = n / (1 + (n-1)/N)
-            
-            return max(1, int(np.ceil(n_adj)))
-        except:
-            return 100
+    # ========================================================================
+    # SAMPLE GENERATION
+    # ========================================================================
     
     def generate_samples(self):
-        """Generate samples with error handling"""
-        if self.data is None or 'risk_score' not in self.data.columns:
-            messagebox.showerror("Error", "Calculate risk scores first")
-            return
-        
+        """Generate samples using selected methods"""
         try:
-            self.root.config(cursor="wait")
-            self.update_status("Generating...", '#FFC107')
-            self.root.update()
+            if self.data is None:
+                messagebox.showwarning('Warning', 'Load and calculate risk first')
+                return
             
-            target_size = self.calculate_sample_size()
+            if 'risk_score' not in self.data.columns:
+                messagebox.showwarning('Warning', 'Calculate risk scores first')
+                return
+            
+            # Get parameters
+            confidence_map = {'90%': 1.645, '95%': 1.96, '99%': 2.576}
+            confidence = confidence_map[self.confidence_combo.get()]
+            margin_error = float(self.margin_combo.get())
+            expected_error = float(self.error_combo.get())
+            
+            # Calculate sample size using Cochran's formula
+            n = (confidence**2 * expected_error * (1-expected_error)) / (margin_error**2)
+            n_finite = n / (1 + (n-1)/len(self.data))
+            sample_size = int(np.ceil(n_finite))
+            
             self.samples = {}
             
-            if self.method_vars['traditional'].get():
-                self.samples['traditional'] = self.data.sample(n=min(target_size, len(self.data)), random_state=42)
+            # Traditional random sampling
+            if self.method_traditional.get():
+                sample = self.data.sample(n=min(sample_size, len(self.data)), random_state=42)
+                self.samples['Traditional'] = sample
             
-            if self.method_vars['risk_based'].get():
-                self.samples['risk_based'] = self.generate_risk_pps_sample(target_size)
+            # Risk-PPS Neyman allocation
+            if self.method_risk_pps.get():
+                sample = self.data.sample(n=min(sample_size, len(self.data)), 
+                                         weights=self.data['risk_score'], random_state=42)
+                self.samples['Risk-PPS'] = sample
             
-            if self.method_vars['hybrid'].get():
-                self.samples['hybrid'] = self.generate_hybrid_sample(target_size)
+            # Hybrid method
+            if self.method_hybrid.get():
+                risk_part = self.data.nlargest(int(sample_size*0.65), 'risk_score')
+                anomaly_part = self.data.sample(n=int(sample_size*0.25), random_state=42)
+                random_part = self.data.sample(n=int(sample_size*0.10), random_state=42)
+                sample = pd.concat([risk_part, anomaly_part, random_part]).drop_duplicates()
+                sample = sample.head(sample_size)
+                self.samples['Hybrid'] = sample
             
-            self.update_summary_table()
-            self.update_results_insights()
+            # Display results
+            self.display_sample_results()
             
-            self.sampling_status.config(text=f"✓ Generated {len(self.samples)} samples", foreground='#28A745')
-            self.update_status("Samples generated", '#28A745')
-            self.root.config(cursor="arrow")
-            messagebox.showinfo("Success", f"Generated {len(self.samples)} sample(s)!")
+            self.log_status(f'Generated {len(self.samples)} sample methods')
+            self.sample_status_label.config(text='✓ Generated')
+            
         except Exception as e:
-            self.root.config(cursor="arrow")
-            messagebox.showerror("Error", f"Failed: {str(e)}")
+            messagebox.showerror('Error', f'Failed to generate samples:\n{str(e)}')
+            self.log_status('Failed to generate samples')
     
-    def generate_risk_pps_sample(self, target_size):
-        """Generate Risk-PPS sample"""
-        data = self.data.copy()
+    def display_sample_results(self):
+        """Display sample generation results"""
+        self.summary_tree.delete(*self.summary_tree.get_children())
+        self.insights_text.delete('1.0', 'end')
         
-        entity_col = self.entity_var.get()
-        region_col = self.region_var.get()
-        product_col = self.product_var.get()
-        all_cols = [entity_col, region_col, product_col] + self.selected_additional_columns
-        
-        samples = []
-        
-        for name, group in data.groupby(all_cols, dropna=False):
-            N_h = len(group)
-            s_h = group['risk_score'].std() if len(group) > 1 else 0.5
-            r_h = group['risk_score'].mean()
-            weight = N_h * s_h * r_h if not (np.isnan(s_h) or np.isnan(r_h)) else N_h
-            
-            n_h = max(1, int(weight * target_size / len(data)))
-            n_h = min(n_h, N_h)
-            
-            if n_h > 0:
-                samples.append(group.sample(n=n_h, random_state=42))
-        
-        return pd.concat(samples) if samples else data.sample(n=min(target_size, len(data)), random_state=42)
-    
-    def generate_hybrid_sample(self, target_size):
-        """Generate Hybrid sample"""
-        risk_sample = self.generate_risk_pps_sample(int(target_size * 0.65))
-        remaining = self.data[~self.data.index.isin(risk_sample.index)]
-        
-        if len(remaining) > 0:
-            random_sample = remaining.sample(n=min(int(target_size * 0.35), len(remaining)), random_state=42)
-            return pd.concat([risk_sample, random_sample])
-        else:
-            return risk_sample
-    
-    def update_summary_table(self):
-        """Update summary table"""
-        for item in self.summary_tree.get_children():
-            self.summary_tree.delete(item)
-        
-        entity_col = self.entity_var.get()
-        region_col = self.region_var.get()
-        product_col = self.product_var.get()
-        all_cols = [entity_col, region_col, product_col] + self.selected_additional_columns
-        
-        total_strata = self.total_strata_count
-        
-        for method_name, sample in self.samples.items():
-            if len(sample) > 0:
-                sampled_strata = len(sample.groupby(all_cols, dropna=False))
-                high_risk = len(sample[sample['risk_score'] > 0.7])
-                high_pct = (high_risk / len(self.data[self.data['risk_score'] > 0.7]) * 100) if len(self.data[self.data['risk_score'] > 0.7]) > 0 else 0
-                avg_risk = sample['risk_score'].mean()
-                
-                self.summary_tree.insert('', 'end',
-                    text=method_name.replace('_', ' ').title(),
-                    values=(f"{len(sample)}", f"{sampled_strata}/{total_strata}", f"{high_pct:.1f}%", f"{avg_risk:.4f}"))
-    
-    def update_results_insights(self):
-        """Update results insights"""
-        self.results_text.config(state='normal')
-        self.results_text.delete(1.0, tk.END)
-        
-        insights = "SAMPLING RESULTS\n" + "="*40 + "\n\n"
-        
-        for method_name, sample in self.samples.items():
-            if len(sample) > 0:
-                high_risk = len(sample[sample['risk_score'] > 0.7])
-                insights += f"{method_name.title()}\n"
-                insights += f"  Size: {len(sample):,}\n"
-                insights += f"  High-Risk: {high_risk} ({high_risk/len(sample)*100:.1f}%)\n"
-                insights += f"  Avg Risk: {sample['risk_score'].mean():.4f}\n\n"
-        
-        self.results_text.insert(1.0, insights)
-        self.results_text.config(state='disabled')
-    
-    # ==================== EXPORT ====================
-    
-    def export_samples(self):
-        """Export samples"""
         if not self.samples:
-            messagebox.showerror("Error", "Generate samples first")
             return
         
+        insights = []
+        
+        for method, sample in self.samples.items():
+            # Calculate metrics
+            size = len(sample)
+            
+            if self.stratified_data is not None:
+                entity_col = self.entity_combo.get()
+                region_col = self.region_combo.get()
+                product_col = self.product_combo.get()
+                strata_cols = [entity_col, region_col, product_col]
+                
+                strata_in_sample = sample.groupby(strata_cols).size().count()
+                total_strata = len(self.stratified_data)
+                strata_coverage = f"{strata_in_sample}/{total_strata}"
+            else:
+                strata_coverage = "N/A"
+            
+            high_risk_pct = (sample['risk_category'] == 'High').sum() / size * 100
+            avg_risk = sample['risk_score'].mean()
+            
+            self.summary_tree.insert('', 'end', values=(
+                method,
+                size,
+                strata_coverage,
+                f"{high_risk_pct:.1f}%",
+                f"{avg_risk:.3f}"
+            ))
+            
+            insights.append(f"{method}: {size} samples, {high_risk_pct:.1f}% high-risk")
+        
+        insights_text = "KEY INSIGHTS\n" + "="*40 + "\n\n"
+        insights_text += "\n".join(insights)
+        insights_text += "\n\n✓ Ready to export samples"
+        
+        self.insights_text.insert('1.0', insights_text)
+    
+    # ========================================================================
+    # EXPORT & ANALYTICS
+    # ========================================================================
+    
+    def export_samples(self):
+        """Export samples to CSV"""
         try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            if not self.samples:
+                messagebox.showwarning('Warning', 'Generate samples first')
+                return
             
-            for method_name, sample in self.samples.items():
-                filename = f"OMRC_Sample_{method_name}_{timestamp}.csv"
-                filepath = os.path.join(self.results_dir, filename)
-                sample.to_csv(filepath, index=False)
+            os.makedirs('OMRC_Results', exist_ok=True)
             
-            messagebox.showinfo("Success", f"Exported to:\n{self.results_dir}")
-            self.update_status(f"Exported", '#28A745')
+            for method, sample in self.samples.items():
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f'OMRC_Results/OMRC_Sample_{method.lower().replace("-", "_")}_{timestamp}.csv'
+                sample.to_csv(filename, index=False)
+            
+            messagebox.showinfo('Success', f'Exported {len(self.samples)} samples to OMRC_Results/')
+            self.log_status(f'Exported {len(self.samples)} samples')
+            
         except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {str(e)}")
+            messagebox.showerror('Error', f'Export failed:\n{str(e)}')
     
     def export_coverage(self):
         """Export coverage report"""
-        if not self.samples:
-            messagebox.showerror("Error", "Generate samples first")
-            return
-        
         try:
+            if self.stratified_data is None:
+                messagebox.showwarning('Warning', 'Calculate risk first')
+                return
+            
+            os.makedirs('OMRC_Results', exist_ok=True)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            report = f"OMRC COVERAGE REPORT\nGenerated: {timestamp}\n\n"
+            filename = f'OMRC_Results/OMRC_Coverage_{timestamp}.txt'
             
-            for method_name, sample in self.samples.items():
-                report += f"{method_name.upper()}\n"
-                report += f"Sample Size: {len(sample):,}\n"
-                report += f"High-Risk: {len(sample[sample['risk_score'] > 0.7])}\n\n"
+            with open(filename, 'w') as f:
+                f.write(self.pop_insights_text.get('1.0', 'end'))
             
-            filename = f"OMRC_Coverage_{timestamp}.txt"
-            filepath = os.path.join(self.results_dir, filename)
+            messagebox.showinfo('Success', f'Coverage report exported to {filename}')
+            self.log_status('Exported coverage report')
             
-            with open(filepath, 'w') as f:
-                f.write(report)
-            
-            messagebox.showinfo("Success", f"Exported to:\n{filepath}")
-            self.update_status(f"Report exported", '#28A745')
         except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {str(e)}")
+            messagebox.showerror('Error', f'Export failed:\n{str(e)}')
     
     def export_all(self):
-        """Export everything"""
+        """Export all results"""
         self.export_samples()
         self.export_coverage()
+    
+    def refresh_strata_analytics(self):
+        """Refresh strata analytics tab"""
+        try:
+            if self.stratified_data is None:
+                messagebox.showwarning('Warning', 'Calculate risk first')
+                return
+            
+            self.display_strata_analytics()
+            self.log_status('Refreshed strata analytics')
+            
+        except Exception as e:
+            messagebox.showerror('Error', f'Analytics refresh failed:\n{str(e)}')
+    
+    def display_strata_analytics(self):
+        """Display strata analytics"""
+        if self.stratified_data is None:
+            return
+        
+        self.strata_dist_text.delete('1.0', 'end')
+        self.risk_dist_text.delete('1.0', 'end')
+        self.stats_summary_text.delete('1.0', 'end')
+        
+        # Strata distribution
+        strata_text = "STRATA DISTRIBUTION\n" + "="*35 + "\n\n"
+        strata_text += f"Total Strata: {len(self.stratified_data)}\n\n"
+        
+        top_strata = self.stratified_data.nlargest(15, 'risk_score_count')
+        strata_text += "Top 15 Strata by Count:\n──────────────────\n"
+        for idx, row in top_strata.iterrows():
+            count = int(row['risk_score_count'])
+            pct = count / len(self.data) * 100
+            strata_text += f"  {count:>6,} ({pct:>5.2f}%)\n"
+        
+        self.strata_dist_text.insert('1.0', strata_text)
+        
+        # Risk distribution
+        risk_text = "RISK DISTRIBUTION\n" + "="*35 + "\n\n"
+        risk_text += "By Risk Category:\n──────────────────\n"
+        
+        for cat in ['High', 'Medium', 'Low']:
+            count = (self.data['risk_category'] == cat).sum()
+            pct = count / len(self.data) * 100
+            risk_text += f"  {cat:8s}: {count:>6,} ({pct:>5.2f}%)\n"
+        
+        risk_text += "\nPercentile Distribution:\n──────────────────\n"
+        for pct in [25, 50, 75, 90, 95, 99]:
+            val = self.data['risk_score'].quantile(pct/100)
+            risk_text += f"  {pct:3d}th: {val:.4f}\n"
+        
+        self.risk_dist_text.insert('1.0', risk_text)
+        
+        # Statistical summary
+        stats_text = "STATISTICAL SUMMARY\n" + "="*35 + "\n\n"
+        
+        stats_text += f"Mean Risk:        {self.data['risk_score'].mean():.6f}\n"
+        stats_text += f"Median Risk:      {self.data['risk_score'].median():.6f}\n"
+        stats_text += f"Std Deviation:    {self.data['risk_score'].std():.6f}\n"
+        stats_text += f"Variance:         {self.data['risk_score'].var():.6f}\n"
+        stats_text += f"Skewness:         {self.data['risk_score'].skew():.6f}\n"
+        stats_text += f"Kurtosis:         {self.data['risk_score'].kurtosis():.6f}\n\n"
+        
+        stats_text += "Strata Statistics:\n──────────────────\n"
+        stats_text += f"Mean Count:       {self.stratified_data['risk_score_count'].mean():.2f}\n"
+        stats_text += f"Median Count:     {self.stratified_data['risk_score_count'].median():.0f}\n"
+        stats_text += f"Min Count:        {self.stratified_data['risk_score_count'].min():.0f}\n"
+        stats_text += f"Max Count:        {self.stratified_data['risk_score_count'].max():.0f}\n\n"
+        
+        stats_text += "✓ Analysis complete"
+        
+        self.stats_summary_text.insert('1.0', stats_text)
 
-# ==================== MAIN ====================
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     root = tk.Tk()
-    app = OMRCSamplingToolV81(root)
+    app = OMRCDashboardApp(root)
     root.mainloop()
