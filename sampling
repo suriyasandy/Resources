@@ -17,7 +17,7 @@ CRITICAL FIXES (Logic Only):
   ✓ Added Allocation Reason field (for audit trail)
   ✓ Added within-stratum sampling (40/60 for large)
 
-UI CHANGES: NONE - Keeping existing UI structure
+UI CHANGES: NONE - Keeping existing UI structure with full column selection
 
 INSTALLATION:
   pip install pandas numpy scikit-learn matplotlib seaborn openpyxl
@@ -27,7 +27,7 @@ RUN:
 """
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, Listbox, Toplevel, MULTIPLE
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -410,7 +410,7 @@ class OMRCRiskBasedSampling:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# GUI APPLICATION - UI UNCHANGED
+# GUI APPLICATION - UI WITH FULL COLUMN SELECTION
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OMRCGUIApplication:
@@ -423,11 +423,12 @@ class OMRCGUIApplication:
         
         self.app = OMRCRiskBasedSampling()
         self.data = None
+        self.selected_additional_columns = []
         
         self.setup_ui()
     
     def setup_ui(self):
-        """Setup notebook tabs - UNCHANGED UI"""
+        """Setup notebook tabs - FULL UI WITH COLUMN SELECTION"""
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -462,29 +463,125 @@ class OMRCGUIApplication:
         self.setup_tab6()
     
     def setup_tab1(self):
-        """Tab 1: Data Loading and Column Selection"""
-        frame = ttk.LabelFrame(self.tab1, text="Data Loading", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        """Tab 1: Data Loading and Column Selection - FULL VERSION"""
+        main_frame = ttk.Frame(self.tab1)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Load Data Button
-        ttk.Button(frame, text="Load CSV/Excel", 
-                  command=self.load_data).pack(pady=5)
+        # Data Loading Frame
+        data_frame = ttk.LabelFrame(main_frame, text="Data Loading", padding=10)
+        data_frame.pack(fill='x', pady=(0, 10))
         
-        # Generate Sample Button
-        ttk.Button(frame, text="Generate Sample Data", 
-                  command=self.generate_sample_data).pack(pady=5)
+        ttk.Button(data_frame, text="Load Data", command=self.load_data).pack(side='left', padx=5)
+        ttk.Button(data_frame, text="Generate Sample Data", command=self.generate_sample_data).pack(side='left', padx=5)
         
-        # Mandatory Columns
-        ttk.Label(frame, text="Mandatory Columns (select 3):").pack()
-        self.mandatory_vars = {}
-        for col in ['Entity', 'Region', 'Product']:
-            var = tk.BooleanVar()
-            self.mandatory_vars[col] = var
-            ttk.Checkbutton(frame, text=col, variable=var).pack()
+        self.data_label = ttk.Label(data_frame, text="No data loaded", font=('Arial', 10, 'bold'), foreground='red')
+        self.data_label.pack(side='left', padx=20)
         
-        # Info Label
-        self.info_label = ttk.Label(frame, text="No data loaded", foreground="blue")
-        self.info_label.pack(pady=10)
+        # Mandatory Columns Frame
+        mandatory_frame = ttk.LabelFrame(main_frame, text="MANDATORY STRATIFICATION COLUMNS", padding=10)
+        mandatory_frame.pack(fill='x', pady=5)
+        
+        ttk.Label(mandatory_frame, text="Entity:*", font=('Arial', 9, 'bold')).grid(row=0, column=0, sticky='w')
+        self.entity_col_var = tk.StringVar(value="")
+        self.entity_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.entity_col_var, width=20)
+        self.entity_col_combo.grid(row=0, column=1, padx=5, sticky='w')
+        
+        ttk.Label(mandatory_frame, text="Region:*", font=('Arial', 9, 'bold')).grid(row=0, column=2, sticky='w', padx=(20,0))
+        self.region_col_var = tk.StringVar(value="")
+        self.region_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.region_col_var, width=20)
+        self.region_col_combo.grid(row=0, column=3, padx=5, sticky='w')
+        
+        ttk.Label(mandatory_frame, text="Product:*", font=('Arial', 9, 'bold')).grid(row=1, column=0, sticky='w')
+        self.product_col_var = tk.StringVar(value="")
+        self.product_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.product_col_var, width=20)
+        self.product_col_combo.grid(row=1, column=1, padx=5, sticky='w')
+        
+        self.mandatory_status = ttk.Label(mandatory_frame, text="⚠ Select all 3 mandatory columns", 
+                                         foreground='red', font=('Arial', 9, 'bold'))
+        self.mandatory_status.grid(row=2, column=0, columnspan=4, pady=10)
+        
+        # Additional Columns Frame
+        additional_frame = ttk.LabelFrame(main_frame, text="ADDITIONAL STRATIFICATION COLUMNS (Optional)", padding=10)
+        additional_frame.pack(fill='x', pady=5)
+        
+        self.additional_cols_label = ttk.Label(additional_frame, text="None selected", foreground='gray')
+        self.additional_cols_label.pack(anchor='w', pady=5)
+        
+        ttk.Button(additional_frame, text="Select Additional Columns", 
+                  command=self.open_column_selector).pack(anchor='w', pady=5)
+        
+        ttk.Label(additional_frame, text="Note: Optional columns for fine-grained risk stratification", 
+                 font=('Arial', 8), foreground='gray').pack(anchor='w')
+        
+        # Data Preview Frame
+        preview_frame = ttk.LabelFrame(main_frame, text="Data Preview", padding=10)
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.tree = ttk.Treeview(preview_frame)
+        scrollbar_y = ttk.Scrollbar(preview_frame, orient="vertical", command=self.tree.yview)
+        scrollbar_x = ttk.Scrollbar(preview_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        
+        self.tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar_y.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        scrollbar_x.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        
+        preview_frame.rowconfigure(0, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+    
+    def open_column_selector(self):
+        """Open dialog to select additional stratification columns"""
+        if self.data is None:
+            messagebox.showerror("Error", "Load data first")
+            return
+        
+        mandatory_cols = [
+            col for col in [self.entity_col_var.get(), self.region_col_var.get(), self.product_col_var.get()]
+            if col.strip() != ""
+        ]
+        available_cols = [col for col in self.data.columns if col not in mandatory_cols]
+        
+        dialog = Toplevel(self.root)
+        dialog.title("Select Additional Stratification Columns")
+        dialog.geometry("500x400")
+        
+        ttk.Label(dialog, text="Select additional columns for fine-grained stratification:", font=('Arial', 10, 'bold')).pack(pady=10)
+        ttk.Label(dialog, text="(Ctrl/Cmd for multiple)", font=('Arial', 9), foreground='gray').pack()
+        
+        frame = ttk.Frame(dialog)
+        frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side='right', fill='y')
+        
+        listbox = Listbox(frame, selectmode=MULTIPLE, yscrollcommand=scrollbar.set, font=('Arial', 10))
+        listbox.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        for col in available_cols:
+            listbox.insert('end', col)
+        
+        for i, col in enumerate(available_cols):
+            if col in self.selected_additional_columns:
+                listbox.selection_set(i)
+        
+        def confirm():
+            selected = listbox.curselection()
+            self.selected_additional_columns = [available_cols[i] for i in selected]
+            
+            if self.selected_additional_columns:
+                preview = ', '.join(self.selected_additional_columns[:3])
+                if len(self.selected_additional_columns) > 3:
+                    preview += '...'
+                self.additional_cols_label.config(
+                    text=f"Selected {len(self.selected_additional_columns)}: {preview}",
+                    foreground='blue'
+                )
+            else:
+                self.additional_cols_label.config(text="None selected (will use only mandatory columns)", foreground='gray')
+            dialog.destroy()
+        
+        ttk.Button(dialog, text="Confirm", command=confirm).pack(pady=10)
     
     def setup_tab2(self):
         """Tab 2: Risk Analysis (Simplified)"""
@@ -594,19 +691,46 @@ class OMRCGUIApplication:
                            else pd.read_excel(file_path)
                 self.app.data = self.data
                 
-                # Set stratum columns
-                available_cols = self.data.columns.tolist()
-                for col in ['Entity', 'Region', 'Product']:
-                    if col in available_cols:
-                        self.mandatory_vars[col].set(True)
-                
-                self.update_stratum_columns()
-                self.info_label.config(
-                    text=f"Data loaded: {len(self.data)} records",
-                    foreground="green"
+                self.update_column_dropdowns()
+                self.update_data_preview()
+                self.data_label.config(
+                    text=f"✓ Loaded {len(self.data):,} records | {len(self.data.columns)} columns",
+                    foreground='green'
                 )
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load data: {str(e)}")
+    
+    def update_column_dropdowns(self):
+        """Update dropdown options"""
+        if self.data is None:
+            return
+        
+        columns = [""] + list(self.data.columns)
+        
+        self.entity_col_combo['values'] = columns
+        self.region_col_combo['values'] = columns
+        self.product_col_combo['values'] = columns
+    
+    def update_data_preview(self):
+        """Update data preview table"""
+        if self.data is None:
+            return
+        
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        display_cols = list(self.data.columns)[:10]
+        
+        self.tree["columns"] = display_cols
+        self.tree["show"] = "headings"
+        
+        for col in display_cols:
+            self.tree.heading(col, text=col.replace('_', ' ').title())
+            self.tree.column(col, width=120)
+        
+        for _, row in self.data.head(50).iterrows():
+            values = [str(row.get(col, '')) for col in display_cols]
+            self.tree.insert("", "end", values=values)
     
     def generate_sample_data(self):
         """Generate sample data for testing"""
@@ -630,25 +754,60 @@ class OMRCGUIApplication:
         self.data = pd.DataFrame(data)
         self.app.data = self.data
         
-        # Set stratum columns
-        for col in ['Entity', 'Region', 'Product']:
-            self.mandatory_vars[col].set(True)
+        self.update_column_dropdowns()
+        self.update_data_preview()
         
-        self.update_stratum_columns()
-        self.info_label.config(
-            text=f"Sample data generated: {len(self.data)} records, {len(self.data.groupby(['Entity', 'Region', 'Product']))} strata",
-            foreground="green"
+        # Pre-select mandatory columns
+        self.entity_col_var.set("Entity")
+        self.region_col_var.set("Region")
+        self.product_col_var.set("Product")
+        
+        self.data_label.config(
+            text=f"✓ Generated {len(self.data):,} records | {len(self.data.columns)} columns",
+            foreground='green'
         )
+    
+    def validate_mandatory_columns(self):
+        """Validate mandatory column selection"""
+        entity_sel = self.entity_col_var.get().strip()
+        region_sel = self.region_col_var.get().strip()
+        product_sel = self.product_col_var.get().strip()
+        
+        all_selected = entity_sel != "" and region_sel != "" and product_sel != ""
+        
+        if all_selected:
+            self.mandatory_status.config(
+                text="✓ All mandatory columns selected", 
+                foreground='green'
+            )
+        else:
+            missing = []
+            if entity_sel == "": missing.append("Entity")
+            if region_sel == "": missing.append("Region")
+            if product_sel == "": missing.append("Product")
+            
+            self.mandatory_status.config(
+                text=f"⚠ Missing: {', '.join(missing)}", 
+                foreground='red'
+            )
+        
+        return all_selected
     
     def update_stratum_columns(self):
         """Update stratum columns based on selection"""
-        self.app.stratum_columns = [col for col, var in self.mandatory_vars.items() 
-                                     if var.get()]
+        cols = [self.entity_col_var.get(), self.region_col_var.get(), self.product_col_var.get()]
+        cols = [c for c in cols if c.strip() != ""]
+        cols.extend(self.selected_additional_columns)
+        self.app.stratum_columns = cols
     
     def calculate_risk(self):
         """Calculate dynamic risk scores - NOW WITH FIX #1"""
         if self.data is None:
             messagebox.showerror("Error", "Please load data first")
+            return
+        
+        if not self.validate_mandatory_columns():
+            messagebox.showerror("Error", "Please select all mandatory columns")
             return
         
         self.update_stratum_columns()
@@ -693,7 +852,7 @@ PHASE 1 (Identification):
 
 PHASE 2 (Risk-Weight Allocation):
   ✓ Large strata identified: {large_strata:,}
-  ✓ Remaining budget for Cochran(1247): {1247 - small_strata:,} samples
+  ✓ Remaining budget for Cochran: {1247 - small_strata:,} samples
 
 RISK SCORE FORMULA:
   Risk_h = ln(N_h) × (N_h / Total_Pop) × 100
