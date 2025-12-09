@@ -1,18 +1,28 @@
 """
 OMRC Enhanced Multi-Dimensional Risk-Based Sampling Tool
-Version 3.0 - COMPLETE REDESIGN WITH IMPROVED METHODOLOGY
+Version 3.1 - FLEXIBLE COLUMN SELECTION FOR RISK FACTORS
 
-Critical Improvements v3.0:
-✓ NEW: Multi-factor composite risk score (Value, Aging, Product, Entity, Region, Reason)
-✓ NEW: Stratified PPS (Probability Proportional to Size) allocation
-✓ NEW: Risk-weighted stratum sizing (N_h × Mean_Risk_h)
-✓ NEW: Configurable dimension weights with business sign-off
-✓ NEW: Stratum-based analysis report with allocation reasons
-✓ FIX: Risk score no longer "frequency only" but incorporates business factors
-✓ FIX: Risk-based and traditional use same sample size (Cochran's formula)
-✓ FIX: Allocation no longer degenerates to one-per-stratum
-✓ FEATURE: Anomaly detection as optional hybrid supplement (not main driver)
-✓ FEATURE: Detailed stratum report with per-stratum allocation justification
+Critical Improvements v3.1:
+✓ NEW: Dynamic risk factor column selection from loaded data
+✓ NEW: User can assign any numeric/categorical column to risk factors
+✓ UPDATED: Tab 1 now includes "Select Risk Factor Columns" button
+✓ UPDATED: Risk Calculation tab adapts to selected risk factor columns
+✓ IMPROVED: Flexible, data-driven risk configuration
+✓ MAINTAINED: All v3.0 methodology improvements
+
+Mandatory Columns (User-Selected):
+- Legal Entity
+- Region
+- Product
+
+Risk Factor Columns (User-Selectable from Data):
+- Value Risk (numeric, e.g., trade_value, amount)
+- Aging Risk (numeric, e.g., aging_days, days_open)
+- Reason Code Risk (categorical, e.g., reason_code, error_type)
+- Additional Stratification (any columns)
+
+Additional Stratification Columns:
+- User can select ANY columns for multi-dimensional stratification
 
 Methodology Standards:
 - AICPA AS 2315 / AU-C 530
@@ -23,7 +33,7 @@ Methodology Standards:
 - Model-assisted survey sampling principles
 
 Author: OMRC Compliance & Surveillance Technology
-Version: 3.0 - Production Ready
+Version: 3.1 - Production Ready
 Last Updated: December 9, 2025
 """
 
@@ -49,7 +59,7 @@ class OMRCRiskBasedSamplingToolV3:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("OMRC Risk-Based Sampling v3.0 - Stratified PPS with Multi-Factor Risk")
+        self.root.title("OMRC Risk-Based Sampling v3.1 - Flexible Risk Factor Selection")
         self.root.geometry("1800x1100")
         self.root.configure(bg='#f0f0f0')
         
@@ -62,14 +72,34 @@ class OMRCRiskBasedSamplingToolV3:
         self.total_strata_count = 0
         self.stratum_analysis = {}
         
-        # Risk configuration
+        # Risk configuration - now dynamic
         self.risk_config = {
-            'value': {'weight': 0.25, 'enabled': True, 'column': None},
-            'aging': {'weight': 0.15, 'enabled': True, 'column': None},
-            'product': {'weight': 0.25, 'enabled': True, 'column': None},
-            'entity': {'weight': 0.15, 'enabled': True, 'column': None},
-            'region': {'weight': 0.10, 'enabled': True, 'column': None},
+            'value': {'weight': 0.25, 'enabled': False, 'column': None},
+            'aging': {'weight': 0.15, 'enabled': False, 'column': None},
             'reason': {'weight': 0.10, 'enabled': False, 'column': None}
+        }
+        
+        # Expert-assigned risk maps (customizable)
+        self.expert_product_risk = {
+            'IRD': 0.95,
+            'FX_Derivatives': 0.90,
+            'Equities': 0.75,
+            'Structured_Products': 0.85,
+            'ABS_MBS': 0.80,
+            'Commodities': 0.70,
+            'Repo': 0.50,
+            'Cash_Bonds': 0.40
+        }
+        
+        self.expert_reason_risk = {
+            'Price_Mismatch': 0.95,
+            'Model_Error': 0.85,
+            'Data_Quality': 0.75,
+            'System_Error': 0.80,
+            'Manual_Override': 0.70,
+            'Counterparty_Issue': 0.60,
+            'Process_Delay': 0.40,
+            'Settlement_Delay': 0.35
         }
         
         self.selected_additional_columns = []
@@ -138,6 +168,9 @@ class OMRCRiskBasedSamplingToolV3:
         self.create_tab6_widgets()
     
     def create_tab1_widgets(self):
+        """Tab 1: Data Loading & Configuration"""
+        
+        # Data Loading
         data_frame = ttk.LabelFrame(self.tab1, text="Data Loading", padding="10")
         data_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
@@ -147,45 +180,36 @@ class OMRCRiskBasedSamplingToolV3:
         self.data_label = ttk.Label(data_frame, text="No data loaded", font=('Arial', 10, 'bold'), foreground='red')
         self.data_label.grid(row=1, column=0, columnspan=2, pady=5)
         
-        # Mandatory columns
-        mandatory_frame = ttk.LabelFrame(self.tab1, text="MANDATORY COLUMNS", padding="10")
+        # Mandatory Columns (3 columns: Entity, Region, Product)
+        mandatory_frame = ttk.LabelFrame(self.tab1, text="MANDATORY COLUMNS (Fixed)", padding="10")
         mandatory_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
-        ttk.Label(mandatory_frame, text="Entity:*", font=('Arial', 9, 'bold')).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(mandatory_frame, text="Legal Entity:*", font=('Arial', 9, 'bold')).grid(row=0, column=0, sticky=tk.W)
         self.entity_col_var = tk.StringVar(value="legal_entity")
-        self.entity_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.entity_col_var, width=20)
+        self.entity_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.entity_col_var, width=25, state='readonly')
         self.entity_col_combo.grid(row=0, column=1, padx=5, sticky=tk.W)
         
         ttk.Label(mandatory_frame, text="Region:*", font=('Arial', 9, 'bold')).grid(row=0, column=2, sticky=tk.W, padx=(20,0))
         self.region_col_var = tk.StringVar(value="region")
-        self.region_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.region_col_var, width=20)
+        self.region_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.region_col_var, width=25, state='readonly')
         self.region_col_combo.grid(row=0, column=3, padx=5, sticky=tk.W)
         
         ttk.Label(mandatory_frame, text="Product:*", font=('Arial', 9, 'bold')).grid(row=1, column=0, sticky=tk.W)
         self.product_col_var = tk.StringVar(value="product_type")
-        self.product_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.product_col_var, width=20)
+        self.product_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.product_col_var, width=25, state='readonly')
         self.product_col_combo.grid(row=1, column=1, padx=5, sticky=tk.W)
         
-        # Risk factor columns
-        risk_frame = ttk.LabelFrame(self.tab1, text="RISK FACTOR COLUMNS", padding="10")
+        # Risk Factor Columns (Select from Data)
+        risk_frame = ttk.LabelFrame(self.tab1, text="RISK FACTOR COLUMNS (Select from Data)", padding="10")
         risk_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
-        ttk.Label(risk_frame, text="Trade Value (for PPS):", font=('Arial', 9)).grid(row=0, column=0, sticky=tk.W)
-        self.value_col_var = tk.StringVar(value="trade_value")
-        self.value_col_combo = ttk.Combobox(risk_frame, textvariable=self.value_col_var, width=20)
-        self.value_col_combo.grid(row=0, column=1, padx=5, sticky=tk.W)
+        ttk.Button(risk_frame, text="Select Risk Factor Columns", 
+                  command=self.open_risk_factor_selector).grid(row=0, column=0, pady=5, sticky=tk.W)
         
-        ttk.Label(risk_frame, text="Aging/Days (in system):", font=('Arial', 9)).grid(row=0, column=2, sticky=tk.W, padx=(20,0))
-        self.aging_col_var = tk.StringVar(value="aging_days")
-        self.aging_col_combo = ttk.Combobox(risk_frame, textvariable=self.aging_col_var, width=20)
-        self.aging_col_combo.grid(row=0, column=3, padx=5, sticky=tk.W)
+        self.risk_factor_label = ttk.Label(risk_frame, text="None selected", foreground='gray', font=('Arial', 9))
+        self.risk_factor_label.grid(row=0, column=1, sticky=tk.W, padx=20)
         
-        ttk.Label(risk_frame, text="Reason Code (optional):", font=('Arial', 9)).grid(row=1, column=0, sticky=tk.W)
-        self.reason_col_var = tk.StringVar(value="reason_code")
-        self.reason_col_combo = ttk.Combobox(risk_frame, textvariable=self.reason_col_var, width=20)
-        self.reason_col_combo.grid(row=1, column=1, padx=5, sticky=tk.W)
-        
-        # Additional columns
+        # Additional Stratification Columns
         additional_frame = ttk.LabelFrame(self.tab1, text="ADDITIONAL STRATIFICATION COLUMNS", padding="10")
         additional_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
@@ -195,7 +219,7 @@ class OMRCRiskBasedSamplingToolV3:
         ttk.Button(additional_frame, text="Select Stratification Columns", 
                   command=self.open_column_selector).grid(row=1, column=0, pady=5, sticky=tk.W)
         
-        # Preview
+        # Data Preview
         preview_frame = ttk.LabelFrame(self.tab1, text="Data Preview", padding="10")
         preview_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
         
@@ -224,19 +248,21 @@ class OMRCRiskBasedSamplingToolV3:
         
         self.weight_vars = {}
         self.weight_sliders = {}
+        self.weight_display_labels = {}
         
-        risk_factors = [
-            ('Value (PPS Size)', 'value', 0.25),
-            ('Product Risk', 'product', 0.25),
-            ('Aging Risk', 'aging', 0.15),
+        # Mandatory factors (Entity, Region, Product)
+        ttk.Label(config_frame, text="MANDATORY FACTORS:", font=('Arial', 10, 'bold')).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(10, 5))
+        
+        mandatory_factors = [
             ('Entity Risk', 'entity', 0.15),
             ('Region Risk', 'region', 0.10),
-            ('Reason Code', 'reason', 0.10)
+            ('Product Risk', 'product', 0.25)
         ]
         
-        for i, (display_name, key, default_weight) in enumerate(risk_factors):
+        row = 1
+        for display_name, key, default_weight in mandatory_factors:
             frame = ttk.Frame(config_frame)
-            frame.grid(row=i, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+            frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
             
             ttk.Label(frame, text=display_name, width=20).pack(side='left')
             
@@ -249,18 +275,52 @@ class OMRCRiskBasedSamplingToolV3:
             slider.pack(side='left', padx=10, fill='x', expand=True)
             self.weight_sliders[key] = slider
             
-            self.weight_display = ttk.Label(frame, text="0.25", width=10, foreground='blue', font=('Arial', 10, 'bold'))
-            self.weight_display.pack(side='left', padx=10)
+            display_label = ttk.Label(frame, text="0.15", width=10, foreground='blue', font=('Arial', 10, 'bold'))
+            display_label.pack(side='left', padx=10)
+            self.weight_display_labels[key] = display_label
             
             self.weight_vars[key].trace('w', lambda *args, k=key: self.update_weight_display(k))
+            row += 1
+        
+        # Optional factors (Value, Aging, Reason)
+        ttk.Label(config_frame, text="OPTIONAL RISK FACTORS (if selected):", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(10, 5))
+        row += 1
+        
+        optional_factors = [
+            ('Value Risk', 'value', 0.25),
+            ('Aging Risk', 'aging', 0.15),
+            ('Reason Code Risk', 'reason', 0.10)
+        ]
+        
+        for display_name, key, default_weight in optional_factors:
+            frame = ttk.Frame(config_frame)
+            frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+            
+            ttk.Label(frame, text=display_name, width=20).pack(side='left')
+            
+            weight_var = tk.DoubleVar(value=default_weight)
+            self.weight_vars[key] = weight_var
+            
+            slider = ttk.Scale(frame, from_=0, to=1, variable=weight_var, 
+                              orient='horizontal', length=300,
+                              command=lambda v, k=key: self.on_weight_change(k, v))
+            slider.pack(side='left', padx=10, fill='x', expand=True)
+            self.weight_sliders[key] = slider
+            
+            display_label = ttk.Label(frame, text="0.25", width=10, foreground='blue', font=('Arial', 10, 'bold'))
+            display_label.pack(side='left', padx=10)
+            self.weight_display_labels[key] = display_label
+            
+            self.weight_vars[key].trace('w', lambda *args, k=key: self.update_weight_display(k))
+            row += 1
         
         # Normalize button
         ttk.Button(config_frame, text="Normalize Weights to 1.0", 
-                  command=self.normalize_weights).grid(row=len(risk_factors), column=0, pady=10, sticky=tk.W)
+                  command=self.normalize_weights).grid(row=row, column=0, pady=10, sticky=tk.W)
         
         self.weight_sum_label = ttk.Label(config_frame, text="Total: 1.00", 
                                          font=('Arial', 10, 'bold'), foreground='green')
-        self.weight_sum_label.grid(row=len(risk_factors), column=1, padx=20)
+        self.weight_sum_label.grid(row=row, column=1, padx=20)
         
         # Calculate risk
         calc_frame = ttk.LabelFrame(main_frame, text="Risk Calculation", padding="10")
@@ -509,7 +569,7 @@ class OMRCRiskBasedSamplingToolV3:
         viz_frame.rowconfigure(0, weight=1)
         viz_frame.columnconfigure(0, weight=1)
     
-    # ===== DATA LOADING & PREVIEW =====
+    # ===== DATA LOADING =====
     
     def load_data(self):
         file_path = filedialog.askopenfilename(
@@ -582,6 +642,7 @@ class OMRCRiskBasedSamplingToolV3:
             messagebox.showerror("Error", f"Failed: {str(e)}")
     
     def update_column_dropdowns(self):
+        """Update mandatory column dropdowns with all data columns"""
         if self.data is None: return
         
         columns = list(self.data.columns)
@@ -589,11 +650,19 @@ class OMRCRiskBasedSamplingToolV3:
         self.entity_col_combo['values'] = columns
         self.region_col_combo['values'] = columns
         self.product_col_combo['values'] = columns
-        self.value_col_combo['values'] = columns
-        self.aging_col_combo['values'] = columns
-        self.reason_col_combo['values'] = columns
+        
+        # Auto-detect if possible
+        for col in self.data.columns:
+            col_lower = col.lower()
+            if 'entity' in col_lower or 'legal' in col_lower:
+                self.entity_col_var.set(col)
+            elif 'region' in col_lower or 'hub' in col_lower:
+                self.region_col_var.set(col)
+            elif 'product' in col_lower or 'type' in col_lower:
+                self.product_col_var.set(col)
     
     def update_data_preview(self):
+        """Update data preview tree with first 50 rows"""
         if self.data is None: return
         
         for item in self.tree.get_children():
@@ -612,13 +681,72 @@ class OMRCRiskBasedSamplingToolV3:
             values = [str(row.get(col, '')) for col in display_cols]
             self.tree.insert("", "end", values=values)
     
-    def open_column_selector(self):
+    def open_risk_factor_selector(self):
+        """Allow user to select which columns to use as risk factors"""
         if self.data is None:
             messagebox.showerror("Error", "Load data first")
             return
         
-        mandatory_cols = [self.entity_col_var.get(), self.region_col_var.get(), self.product_col_var.get(),
-                         self.value_col_var.get(), self.aging_col_var.get(), self.reason_col_var.get()]
+        mandatory_cols = [self.entity_col_var.get(), self.region_col_var.get(), self.product_col_var.get()]
+        available_cols = [col for col in self.data.columns if col not in mandatory_cols]
+        
+        dialog = Toplevel(self.root)
+        dialog.title("Select Risk Factor Columns")
+        dialog.geometry("600x500")
+        
+        ttk.Label(dialog, text="Select columns for Value, Aging, and Reason Code risk factors:", 
+                 font=('Arial', 10, 'bold')).pack(pady=10)
+        ttk.Label(dialog, text="(Leave unchecked to skip)", font=('Arial', 9), foreground='gray').pack()
+        
+        # Create frames for each risk factor
+        factor_selections = {}
+        
+        for factor_name, factor_key in [('Value Risk (numeric)', 'value'), 
+                                        ('Aging Risk (numeric)', 'aging'), 
+                                        ('Reason Code Risk (categorical)', 'reason')]:
+            frame = ttk.LabelFrame(dialog, text=factor_name, padding="10")
+            frame.pack(fill='x', padx=10, pady=5)
+            
+            selected_var = tk.StringVar(value=self.risk_config[factor_key]['column'] or '')
+            factor_selections[factor_key] = selected_var
+            
+            combo = ttk.Combobox(frame, textvariable=selected_var, values=available_cols, width=50)
+            combo.pack(fill='x', padx=5, pady=5)
+            
+            ttk.Label(frame, text=f"Click to select a column for {factor_name.lower()}", 
+                     font=('Arial', 8), foreground='gray').pack()
+        
+        def confirm():
+            for factor_key, var in factor_selections.items():
+                col = var.get().strip()
+                if col and col in self.data.columns:
+                    self.risk_config[factor_key]['enabled'] = True
+                    self.risk_config[factor_key]['column'] = col
+                else:
+                    self.risk_config[factor_key]['enabled'] = False
+                    self.risk_config[factor_key]['column'] = None
+            
+            # Update label
+            selected = [f"{k.upper()}: {v['column']}" for k, v in self.risk_config.items() if v['enabled']]
+            if selected:
+                self.risk_factor_label.config(
+                    text=f"✓ Selected: {', '.join(selected)}",
+                    foreground='blue'
+                )
+            else:
+                self.risk_factor_label.config(text="None selected", foreground='gray')
+            
+            dialog.destroy()
+        
+        ttk.Button(dialog, text="Confirm", command=confirm).pack(pady=20)
+    
+    def open_column_selector(self):
+        """Select additional stratification columns"""
+        if self.data is None:
+            messagebox.showerror("Error", "Load data first")
+            return
+        
+        mandatory_cols = [self.entity_col_var.get(), self.region_col_var.get(), self.product_col_var.get()]
         available_cols = [col for col in self.data.columns if col not in mandatory_cols]
         
         dialog = Toplevel(self.root)
@@ -673,6 +801,10 @@ class OMRCRiskBasedSamplingToolV3:
         # Update label color based on total
         color = 'green' if abs(total - 1.0) < 0.01 else 'red'
         self.weight_sum_label.config(text=f"Total: {total:.2f}", foreground=color)
+        
+        # Update individual weight display
+        if key in self.weight_display_labels:
+            self.weight_display_labels[key].config(text=f"{self.weight_vars[key].get():.2f}")
     
     def normalize_weights(self):
         """Normalize all weights to sum to 1.0"""
@@ -682,7 +814,7 @@ class OMRCRiskBasedSamplingToolV3:
                 normalized = self.weight_vars[k].get() / total
                 self.weight_vars[k].set(normalized)
             self.update_weight_display(list(self.weight_vars.keys())[0])
-            messagebox.showinfo("Success", f"Weights normalized to sum = 1.0")
+            messagebox.showinfo("Success", "Weights normalized to sum = 1.0")
     
     def calculate_composite_risk_scores(self):
         """Calculate multi-factor composite risk score"""
@@ -691,105 +823,111 @@ class OMRCRiskBasedSamplingToolV3:
             return
         
         try:
-            # Get column names
+            # Get mandatory column names
             entity_col = self.entity_col_var.get()
             region_col = self.region_col_var.get()
             product_col = self.product_col_var.get()
-            value_col = self.value_col_var.get()
-            aging_col = self.aging_col_var.get()
-            reason_col = self.reason_col_var.get()
             
             required = [entity_col, region_col, product_col]
             missing = [col for col in required if col not in self.data.columns]
             
             if missing:
-                messagebox.showerror("Error", f"Missing columns: {missing}")
+                messagebox.showerror("Error", f"Missing mandatory columns: {missing}")
                 return
             
             # Start with a copy
             df = self.data.copy()
             
-            # ===== FACTOR 1: ENTITY RISK =====
+            # ===== MANDATORY FACTORS =====
             entity_risk = self._calculate_factor_risk(df, entity_col, 'Entity')
-            
-            # ===== FACTOR 2: REGION RISK =====
             region_risk = self._calculate_factor_risk(df, region_col, 'Region')
             
-            # ===== FACTOR 3: PRODUCT RISK =====
-            # Use expert-assigned risk (more important in practice)
-            product_risk_map = {
-                'IRD': 0.95,
-                'FX_Derivatives': 0.90,
-                'Equities': 0.75,
-                'Structured_Products': 0.85,
-                'ABS_MBS': 0.80,
-                'Commodities': 0.70,
-                'Repo': 0.50,
-                'Cash_Bonds': 0.40
-            }
+            # Product risk (expert-assigned)
             product_risk = df[product_col].map(
-                lambda x: product_risk_map.get(x, 0.5)
+                lambda x: self.expert_product_risk.get(str(x), 0.5)
             ).fillna(0.5)
             
-            # ===== FACTOR 4: VALUE RISK (PPS) =====
-            if value_col and value_col in df.columns:
-                df = self.ensure_numeric_column(df, value_col)
-                value_risk = self._normalize_to_risk_score(df[value_col].fillna(0), name='Trade Value')
-            else:
-                value_risk = pd.Series(0.5, index=df.index)
+            # ===== OPTIONAL FACTORS =====
+            risk_components = []
+            active_weights = {}
             
-            # ===== FACTOR 5: AGING RISK =====
-            if aging_col and aging_col in df.columns:
-                df = self.ensure_numeric_column(df, aging_col)
-                aging_risk = self._normalize_to_risk_score(df[aging_col].fillna(0), name='Aging Days')
-            else:
-                aging_risk = pd.Series(0.5, index=df.index)
+            # Add mandatory factors
+            risk_components.append(self.weight_vars['entity'].get() * entity_risk)
+            active_weights['entity'] = self.weight_vars['entity'].get()
             
-            # ===== FACTOR 6: REASON CODE RISK =====
-            reason_risk_map = {
-                'Price_Mismatch': 0.95,
-                'Model_Error': 0.85,
-                'Data_Quality': 0.75,
-                'System_Error': 0.80,
-                'Manual_Override': 0.70,
-                'Counterparty_Issue': 0.60,
-                'Process_Delay': 0.40,
-                'Settlement_Delay': 0.35
-            }
+            risk_components.append(self.weight_vars['region'].get() * region_risk)
+            active_weights['region'] = self.weight_vars['region'].get()
             
-            if reason_col and reason_col in df.columns:
-                reason_risk = df[reason_col].map(
-                    lambda x: reason_risk_map.get(x, 0.5)
-                ).fillna(0.5)
-            else:
-                reason_risk = pd.Series(0.5, index=df.index)
+            risk_components.append(self.weight_vars['product'].get() * product_risk)
+            active_weights['product'] = self.weight_vars['product'].get()
             
-            # ===== COMPOSITE RISK SCORE =====
-            # Get current weights
-            weights = {
-                'value': self.weight_vars['value'].get(),
-                'aging': self.weight_vars['aging'].get(),
-                'product': self.weight_vars['product'].get(),
-                'entity': self.weight_vars['entity'].get(),
-                'region': self.weight_vars['region'].get(),
-                'reason': self.weight_vars['reason'].get()
-            }
+            # VALUE RISK
+            if self.risk_config['value']['enabled'] and self.risk_config['value']['column']:
+                value_col = self.risk_config['value']['column']
+                if value_col in df.columns:
+                    df = self.ensure_numeric_column(df, value_col)
+                    value_risk = self._normalize_to_risk_score(df[value_col].fillna(0), name='Trade Value')
+                    risk_components.append(self.weight_vars['value'].get() * value_risk)
+                    active_weights['value'] = self.weight_vars['value'].get()
+            
+            # AGING RISK
+            if self.risk_config['aging']['enabled'] and self.risk_config['aging']['column']:
+                aging_col = self.risk_config['aging']['column']
+                if aging_col in df.columns:
+                    df = self.ensure_numeric_column(df, aging_col)
+                    aging_risk = self._normalize_to_risk_score(df[aging_col].fillna(0), name='Aging')
+                    risk_components.append(self.weight_vars['aging'].get() * aging_risk)
+                    active_weights['aging'] = self.weight_vars['aging'].get()
+            
+            # REASON CODE RISK
+            if self.risk_config['reason']['enabled'] and self.risk_config['reason']['column']:
+                reason_col = self.risk_config['reason']['column']
+                if reason_col in df.columns:
+                    reason_risk = df[reason_col].map(
+                        lambda x: self.expert_reason_risk.get(str(x), 0.5)
+                    ).fillna(0.5)
+                    risk_components.append(self.weight_vars['reason'].get() * reason_risk)
+                    active_weights['reason'] = self.weight_vars['reason'].get()
+            
+            # ===== NORMALIZE WEIGHTS AND CALCULATE COMPOSITE =====
+            total_weight = sum(active_weights.values())
+            if total_weight == 0:
+                raise ValueError("No active risk factors selected. Please enable at least one optional factor or verify mandatory factors.")
             
             # Normalize weights
-            total_weight = sum(weights.values())
-            if total_weight > 0:
-                weights = {k: v / total_weight for k, v in weights.items()}
+            normalized_weights = {k: v / total_weight for k, v in active_weights.items()}
             
-            # Calculate composite
-            composite = (
-                weights['value'] * value_risk +
-                weights['aging'] * aging_risk +
-                weights['product'] * product_risk +
-                weights['entity'] * entity_risk +
-                weights['region'] * region_risk +
-                weights['reason'] * reason_risk
-            )
+            # Recalculate components with normalized weights
+            risk_components = []
             
+            risk_components.append(normalized_weights.get('entity', 0) * entity_risk)
+            risk_components.append(normalized_weights.get('region', 0) * region_risk)
+            risk_components.append(normalized_weights.get('product', 0) * product_risk)
+            
+            if self.risk_config['value']['enabled'] and self.risk_config['value']['column']:
+                value_col = self.risk_config['value']['column']
+                if value_col in df.columns:
+                    df = self.ensure_numeric_column(df, value_col)
+                    value_risk = self._normalize_to_risk_score(df[value_col].fillna(0))
+                    risk_components.append(normalized_weights.get('value', 0) * value_risk)
+            
+            if self.risk_config['aging']['enabled'] and self.risk_config['aging']['column']:
+                aging_col = self.risk_config['aging']['column']
+                if aging_col in df.columns:
+                    df = self.ensure_numeric_column(df, aging_col)
+                    aging_risk = self._normalize_to_risk_score(df[aging_col].fillna(0))
+                    risk_components.append(normalized_weights.get('aging', 0) * aging_risk)
+            
+            if self.risk_config['reason']['enabled'] and self.risk_config['reason']['column']:
+                reason_col = self.risk_config['reason']['column']
+                if reason_col in df.columns:
+                    reason_risk = df[reason_col].map(
+                        lambda x: self.expert_reason_risk.get(str(x), 0.5)
+                    ).fillna(0.5)
+                    risk_components.append(normalized_weights.get('reason', 0) * reason_risk)
+            
+            # Calculate composite risk score
+            composite = sum(risk_components)
             df['risk_score'] = np.clip(composite, 0.01, 1.0)
             df = self.ensure_numeric_column(df, 'risk_score')
             
@@ -808,15 +946,15 @@ class OMRCRiskBasedSamplingToolV3:
             self.total_strata_count = len(self.data.groupby(stratum_cols))
             
             # Update displays
-            self.update_population_insights(value_col, aging_col, reason_col)
+            self.update_population_insights(active_weights)
             
             self.risk_calc_label.config(
-                text=f"✓ Calculated ({len(stratum_cols)} dimensions, {self.total_strata_count:,} strata)",
+                text=f"✓ Calculated ({len(stratum_cols)} dimensions, {self.total_strata_count:,} strata, {len(active_weights)} factors)",
                 foreground='green'
             )
             
             messagebox.showinfo("Success", 
-                f"Risk scores calculated for {len(stratum_cols)} dimensions\n{self.total_strata_count:,} unique strata")
+                f"Risk scores calculated\nDimensions: {len(stratum_cols)} | Strata: {self.total_strata_count:,} | Factors: {len(active_weights)}")
         
         except Exception as e:
             messagebox.showerror("Error", f"Calculation failed: {str(e)}")
@@ -824,12 +962,11 @@ class OMRCRiskBasedSamplingToolV3:
             traceback.print_exc()
     
     def _calculate_factor_risk(self, df, column, factor_name):
-        """Calculate risk for a categorical factor using frequency + expert adjustment"""
+        """Calculate risk for a categorical factor using frequency"""
         counts = df[column].value_counts()
         total = len(df)
         frequencies = counts / total
         
-        # Min-max normalize
         min_f = frequencies.min()
         max_f = frequencies.max()
         
@@ -853,8 +990,8 @@ class OMRCRiskBasedSamplingToolV3:
         
         return normalized
     
-    def update_population_insights(self, value_col, aging_col, reason_col):
-        """Update population insights text"""
+    def update_population_insights(self, active_weights):
+        """Update population insights"""
         self.insights_text.delete(1.0, tk.END)
         
         if self.data is None or 'risk_score' not in self.data.columns:
@@ -921,18 +1058,17 @@ Strata with <5 records:        {len(stratum_sizes[stratum_sizes < 5]):,} ({len(s
         insights += f"""
 RISK SCORE COMPONENTS (Configured Weights)
 ═══════════════════════════════════════════════════════════════════════════════
-Value (PPS Size):              {self.weight_vars['value'].get():.2%}
-Product Risk:                  {self.weight_vars['product'].get():.2%}
-Aging Risk:                    {self.weight_vars['aging'].get():.2%}
-Entity Risk:                   {self.weight_vars['entity'].get():.2%}
-Region Risk:                   {self.weight_vars['region'].get():.2%}
-Reason Code Risk:              {self.weight_vars['reason'].get():.2%}
-                               ──────
-                               Total: {sum(self.weight_vars[k].get() for k in self.weight_vars):.2%}
+"""
+        
+        for factor, weight in active_weights.items():
+            insights += f"{factor.upper():20s}: {weight:.2%}\n"
+        
+        insights += f"""                               ──────
+                               Total: {sum(active_weights.values()):.2%}
 
 KEY INSIGHTS
 ═══════════════════════════════════════════════════════════════════════════════
-• Multi-factor risk score incorporates trade value, aging, product, entity, region
+• Multi-factor risk score incorporates selected business factors
 • Risk-Stratified PPS allocation prioritizes high-risk, high-value strata
 • Small, low-risk strata intentionally under-sampled to maximize detection power
 • Stratum-based analysis provides per-strata allocation justification for auditors
@@ -966,8 +1102,6 @@ KEY INSIGHTS
             return data.copy(), {}
         
         sample = data.sample(n=sample_size, random_state=42)
-        
-        # Stratum analysis
         stratum_info = self._analyze_strata_sampling(data, sample, 'Traditional')
         
         return sample, stratum_info
@@ -982,14 +1116,13 @@ KEY INSIGHTS
         
         stratum_groups = data.groupby(self.stratum_columns, observed=True)
         
-        # ===== STEP 1: Calculate stratum weights (N_h × Mean_Risk_h) =====
         stratum_allocations = {}
         total_weighted = 0
         
         for name, group in stratum_groups:
             N_h = len(group)
             mean_risk_h = group['risk_score'].mean()
-            size_weight = N_h * mean_risk_h  # PPS weight
+            size_weight = N_h * mean_risk_h
             
             stratum_allocations[name] = {
                 'population': N_h,
@@ -999,7 +1132,6 @@ KEY INSIGHTS
             }
             total_weighted += size_weight
         
-        # ===== STEP 2: Allocate samples using PPS =====
         stratum_samples = {}
         
         for name, details in stratum_allocations.items():
@@ -1011,13 +1143,10 @@ KEY INSIGHTS
             n_h = min(n_h, details['population'])
             stratum_samples[name] = n_h
         
-        # ===== STEP 3: Adjust to match exact target =====
         total_allocated = sum(stratum_samples.values())
         
         if total_allocated < target_size:
             diff = target_size - total_allocated
-            
-            # Add to highest-weight strata
             sorted_strata = sorted(stratum_allocations.items(),
                                  key=lambda x: x[1]['size_weight'],
                                  reverse=True)
@@ -1032,9 +1161,7 @@ KEY INSIGHTS
                 diff -= can_add
         
         elif total_allocated > target_size:
-            # Remove from lowest-weight strata
             diff = total_allocated - target_size
-            
             sorted_strata = sorted(stratum_allocations.items(),
                                  key=lambda x: x[1]['size_weight'],
                                  reverse=False)
@@ -1048,7 +1175,6 @@ KEY INSIGHTS
                 total_allocated -= can_remove
                 diff -= can_remove
         
-        # ===== STEP 4: Sample from each stratum using PPS within-stratum =====
         samples = []
         
         for name, group in stratum_groups:
@@ -1058,10 +1184,8 @@ KEY INSIGHTS
                 group = self.ensure_numeric_column(group.copy(), 'risk_score')
                 
                 if sample_size_h >= len(group):
-                    # Take all records
                     samples.append(group)
                 else:
-                    # Prioritize high-risk records (within-stratum PPS)
                     high_risk_count = max(1, int(sample_size_h * 0.5))
                     
                     group_sorted = group.sort_values('risk_score', ascending=False)
@@ -1111,14 +1235,11 @@ KEY INSIGHTS
         target_size = self.safe_int_conversion(target_size, 100)
         data = self.ensure_numeric_column(data.copy(), 'risk_score')
         
-        # 70% from risk-based PPS
         pps_size = int(target_size * 0.70)
         pps_sample, _ = self.risk_stratified_pps_sampling(data, pps_size)
         
-        # Get remaining unsampled records
         remaining = data[~data.index.isin(pps_sample.index)]
         
-        # 20% from anomalies (Isolation Forest)
         anomaly_size = int(target_size * 0.20)
         
         if len(remaining) > anomaly_size and anomaly_size > 0:
@@ -1143,7 +1264,6 @@ KEY INSIGHTS
         else:
             anomaly_sample = remaining.head(min(anomaly_size, len(remaining)))
         
-        # 10% random from what's left
         random_remaining = data[~data.index.isin(pps_sample.index) & ~data.index.isin(anomaly_sample.index)]
         random_size = target_size - len(pps_sample) - len(anomaly_sample)
         
@@ -1152,7 +1272,6 @@ KEY INSIGHTS
         else:
             random_sample = pd.DataFrame()
         
-        # Combine
         hybrid_sample = pd.concat([pps_sample, anomaly_sample, random_sample]).drop_duplicates()
         
         if len(hybrid_sample) < target_size:
@@ -1163,7 +1282,6 @@ KEY INSIGHTS
                 hybrid_sample = pd.concat([hybrid_sample, extra])
         
         sample = hybrid_sample.head(target_size)
-        
         stratum_info = self._analyze_strata_sampling(data, sample, 'Hybrid')
         
         return sample, stratum_info
@@ -1174,7 +1292,6 @@ KEY INSIGHTS
             return {}
         
         stratum_groups = full_data.groupby(self.stratum_columns, observed=True)
-        sample_groups = sample_data.groupby(self.stratum_columns, observed=True)
         
         analysis = {}
         
@@ -1200,19 +1317,16 @@ KEY INSIGHTS
             return
         
         try:
-            # Parameters
             confidence = self.safe_int_conversion(self.confidence_var.get(), 95)
             margin = self.safe_float_conversion(self.margin_var.get(), 0.05)
             error_rate = self.safe_float_conversion(self.error_rate_var.get(), 0.15)
             
-            # Calculate sample size (same for Traditional & Risk-PPS)
             global_sample_size = self.calculate_cochran_sample_size(confidence, margin, error_rate)
             
             self.comparison_results = {}
             self.out_of_scope_data = {}
             self.missed_strata = {}
             
-            # ===== TRADITIONAL =====
             if self.method_vars['traditional'].get():
                 trad_sample, trad_info = self.traditional_sampling(self.data, global_sample_size)
                 self.comparison_results['traditional'] = {
@@ -1221,7 +1335,6 @@ KEY INSIGHTS
                 }
                 self.out_of_scope_data['traditional'] = self.data[~self.data.index.isin(trad_sample.index)]
             
-            # ===== RISK-STRATIFIED PPS =====
             if self.method_vars['risk_pps'].get():
                 pps_sample, pps_info = self.risk_stratified_pps_sampling(self.data, global_sample_size)
                 self.comparison_results['risk_pps'] = {
@@ -1230,9 +1343,8 @@ KEY INSIGHTS
                 }
                 self.out_of_scope_data['risk_pps'] = self.data[~self.data.index.isin(pps_sample.index)]
             
-            # ===== HYBRID =====
             if self.method_vars['hybrid'].get():
-                hybrid_size = int(global_sample_size * 1.3)  # Hybrid uses more
+                hybrid_size = int(global_sample_size * 1.3)
                 hybrid_sample, hybrid_info = self.hybrid_pps_anomaly_sampling(self.data, hybrid_size)
                 self.comparison_results['hybrid'] = {
                     'sample': hybrid_sample,
@@ -1240,12 +1352,11 @@ KEY INSIGHTS
                 }
                 self.out_of_scope_data['hybrid'] = self.data[~self.data.index.isin(hybrid_sample.index)]
             
-            # Update UI
             self.update_summary_table(global_sample_size)
             self.update_coverage_analysis()
             self.update_sampling_insights(global_sample_size)
             
-            messagebox.showinfo("Success", "Samples generated successfully!\nReview Coverage tab and Stratum Report tab")
+            messagebox.showinfo("Success", "Samples generated successfully!")
         
         except Exception as e:
             messagebox.showerror("Error", f"Sampling failed: {str(e)}")
@@ -1264,15 +1375,12 @@ KEY INSIGHTS
             sample = self.comparison_results[method_key]['sample']
             stratum_info = self.comparison_results[method_key]['stratum_info']
             
-            # Count covered strata
             covered_strata = sum(1 for info in stratum_info.values() if info['sampled'] > 0)
             
-            # High-risk coverage
             high_risk_in_sample = len(sample[sample['risk_score'] > 0.7])
             high_risk_total = len(self.data[self.data['risk_score'] > 0.7])
             high_risk_pct = (high_risk_in_sample / high_risk_total * 100) if high_risk_total > 0 else 0
             
-            # Display method name
             display_name = {
                 'traditional': 'Traditional Random',
                 'risk_pps': 'Risk-Stratified PPS',
@@ -1293,16 +1401,12 @@ KEY INSIGHTS
     def update_coverage_analysis(self):
         """Update per-method coverage analysis"""
         for method_key in ['traditional', 'risk_pps', 'hybrid']:
-            if method_key not in self.method_coverage_tabs:
-                continue
-            
-            if method_key not in self.comparison_results:
+            if method_key not in self.method_coverage_tabs or method_key not in self.comparison_results:
                 continue
             
             sample = self.comparison_results[method_key]['sample']
             stratum_groups = self.data.groupby(self.stratum_columns, observed=True)
             
-            # Clear trees
             missed_tree = self.method_coverage_tabs[method_key]['missed_tree']
             all_tree = self.method_coverage_tabs[method_key]['all_tree']
             
@@ -1311,7 +1415,6 @@ KEY INSIGHTS
             for item in all_tree.get_children():
                 all_tree.delete(item)
             
-            # Populate
             for name, group in stratum_groups:
                 population = len(group)
                 mean_risk = group['risk_score'].mean()
@@ -1320,7 +1423,6 @@ KEY INSIGHTS
                 sampled = len(sample[sample['stratum'] == stratum_str]) if 'stratum' in sample.columns else 0
                 coverage = (sampled / population * 100) if population > 0 else 0
                 
-                # All strata
                 reason = "High risk & large" if mean_risk > 0.7 and population > 100 else \
                         "Low risk & small" if mean_risk < 0.3 and population < 10 else \
                         "Medium risk"
@@ -1328,7 +1430,6 @@ KEY INSIGHTS
                 all_tree.insert("", "end", text=stratum_str,
                               values=(population, sampled, f"{coverage:.1f}%", f"{mean_risk:.3f}", reason))
                 
-                # Missed strata
                 if sampled == 0:
                     reason = "Low risk score" if mean_risk < 0.3 else \
                             "Small population" if population < 5 else \
@@ -1338,23 +1439,16 @@ KEY INSIGHTS
                                      values=(population, f"{mean_risk:.3f}", reason))
     
     def update_sampling_insights(self, cochran_size):
-        """Update sampling insights text"""
+        """Update sampling insights"""
         self.sampling_insights_text.delete(1.0, tk.END)
         
         insights = f"""╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                       SAMPLING METHODOLOGY & RESULTS                          ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
-COCHRAN'S SAMPLE SIZE CALCULATION
+COCHRAN'S SAMPLE SIZE
 ═══════════════════════════════════════════════════════════════════════════════
-Global Sample Size (Traditional & Risk-PPS): {cochran_size} records
-
-Inputs:
-  • Confidence Level:           {self.confidence_var.get()}%
-  • Margin of Error:            {self.margin_var.get()}
-  • Expected Error Rate (p):    {self.error_rate_var.get()}
-
-Formula: n = (Z² × p × q) / E² where q = (1 - p)
+Global Sample Size: {cochran_size} records (Confidence: {self.confidence_var.get()}%, Margin: {self.margin_var.get()}, p: {self.error_rate_var.get()})
 
 METHODOLOGY COMPARISON
 ═══════════════════════════════════════════════════════════════════════════════
@@ -1368,23 +1462,9 @@ METHODOLOGY COMPARISON
             high_risk_trad = len(trad_sample[trad_sample['risk_score'] > 0.7])
             high_risk_total = len(self.data[self.data['risk_score'] > 0.7])
             
-            insights += f"""TRADITIONAL RANDOM SAMPLING
-───────────────────────────────────────────────────────────────────────────────
-• Sample Size:                 {len(trad_sample):,} records
-• Strata Covered:              {covered_trad}/{self.total_strata_count} ({covered_trad/self.total_strata_count*100:.1f}%)
-• High-Risk Records (>0.7):    {high_risk_trad:,} of {high_risk_total:,} ({high_risk_trad/high_risk_total*100:.1f}%)
-• Average Risk Score:          {trad_sample['risk_score'].mean():.3f}
-• Risk Variance:               {trad_sample['risk_score'].var():.4f}
-
-Strengths:
-  ✓ Simple, defensible approach
-  ✓ No selection bias from risk scores
-  ✓ Unbiased point estimators
-
-Limitations:
-  ✗ Low coverage of important strata
-  ✗ Risk concentration is random
-  ✗ Low detection of high-risk issues
+            insights += f"""
+TRADITIONAL RANDOM SAMPLING
+• Sample Size: {len(trad_sample):,} | Strata Covered: {covered_trad}/{self.total_strata_count} | High-Risk: {high_risk_trad}/{high_risk_total} ({high_risk_trad/high_risk_total*100:.1f}%)
 
 """
         
@@ -1396,29 +1476,8 @@ Limitations:
             high_risk_pps = len(pps_sample[pps_sample['risk_score'] > 0.7])
             
             insights += f"""RISK-STRATIFIED PPS (RECOMMENDED)
-───────────────────────────────────────────────────────────────────────────────
-• Sample Size:                 {len(pps_sample):,} records (same as Traditional)
-• Strata Covered:              {covered_pps}/{self.total_strata_count} ({covered_pps/self.total_strata_count*100:.1f}%)
-• High-Risk Records (>0.7):    {high_risk_pps:,} of {high_risk_total:,} ({high_risk_pps/high_risk_total*100:.1f}%)
-• Average Risk Score:          {pps_sample['risk_score'].mean():.3f}
-• Risk Variance:               {pps_sample['risk_score'].var():.4f}
-
-Methodology:
-  1. Stratify population into {self.total_strata_count:,} strata
-  2. Calculate PPS weight for each stratum: N_h × Mean_Risk_h
-  3. Allocate {len(pps_sample):,} samples proportionally to stratum weight
-  4. Within each stratum: 50% highest-risk records + 50% random
-  5. Compliance: AICPA AU-C 530 / ISA 530 stratified PPS design
-
-Strengths:
-  ✓ {covered_pps - covered_trad}+ more strata covered than traditional
-  ✓ Concentrates samples on high-risk, large strata
-  ✓ Same sample size as traditional (cost-neutral)
-  ✓ Design-based and defensible to auditors
-  ✓ Better detection of systemic issues
-
-Recommendation:
-  USE RISK-STRATIFIED PPS as your primary method. Better coverage + same cost.
+• Sample Size: {len(pps_sample):,} | Strata Covered: {covered_pps}/{self.total_strata_count} | High-Risk: {high_risk_pps}/{high_risk_total} ({high_risk_pps/high_risk_total*100:.1f}%)
+• Better Coverage: +{covered_pps - covered_trad} strata | Better High-Risk Detection: +{high_risk_pps - high_risk_trad} records
 
 """
         
@@ -1429,43 +1488,15 @@ Recommendation:
             
             high_risk_hybrid = len(hybrid_sample[hybrid_sample['risk_score'] > 0.7])
             
-            insights += f"""HYBRID (PPS + ANOMALIES) [OPTIONAL]
-───────────────────────────────────────────────────────────────────────────────
-• Sample Size:                 {len(hybrid_sample):,} records (130% of Cochran size)
-• Composition:                 70% Risk-PPS + 20% Anomalies + 10% Random
-• Strata Covered:              {covered_hybrid}/{self.total_strata_count} ({covered_hybrid/self.total_strata_count*100:.1f}%)
-• High-Risk Records (>0.7):    {high_risk_hybrid:,} of {high_risk_total:,} ({high_risk_hybrid/high_risk_total*100:.1f}%)
-• Average Risk Score:          {hybrid_sample['risk_score'].mean():.3f}
+            insights += f"""HYBRID (PPS + ANOMALIES)
+• Sample Size: {len(hybrid_sample):,} | Strata Covered: {covered_hybrid}/{self.total_strata_count} | High-Risk: {high_risk_hybrid}/{high_risk_total} ({high_risk_hybrid/high_risk_total*100:.1f}%)
 
-Use When:
-  • Audit committee wants maximum detection power
-  • Strong concerns about undiscovered anomalies
-  • Budget allows additional sample capacity
 """
         
-        insights += f"""
-AUDITOR GUIDANCE & DEFENSE
+        insights += """SUMMARY
 ═══════════════════════════════════════════════════════════════════════════════
-When discussing with external auditors:
-
-1. Explain Population Stratification
-   "We identified {self.total_strata_count:,} unique risk strata based on Entity, Region,
-    Product, and other business attributes."
-
-2. Justify Risk Weighting
-   "We use multi-factor risk scores (Value, Aging, Product, Entity, Reason Code)
-    per AICPA AU-C 530 risk-based sampling guidance."
-
-3. Defend Allocation
-   "Risk-PPS allocation gives more samples to high-risk, high-impact strata,
-    improving detection power vs. simple random."
-
-4. Address Coverage Gaps
-   "Small, low-risk strata intentionally under-sampled; documented in Stratum
-    Report with reasons. Missed strata pose minimal audit risk."
-
-5. Ensure Reproducibility
-   "Fixed random seed ensures results are reproducible; auditors can verify."
+Recommendation: Use Risk-Stratified PPS for better strata coverage and high-risk
+detection with the same sample size as traditional random sampling.
 """
         
         self.sampling_insights_text.insert(1.0, insights)
@@ -1484,7 +1515,6 @@ When discussing with external auditors:
         pps_sample = self.comparison_results['risk_pps']['sample']
         stratum_groups = self.data.groupby(self.stratum_columns, observed=True)
         
-        # Build report
         report_data = []
         
         for name, group in stratum_groups:
@@ -1495,10 +1525,8 @@ When discussing with external auditors:
             sampled = len(pps_sample[pps_sample['stratum'] == stratum_str]) if 'stratum' in pps_sample.columns else 0
             coverage = (sampled / population * 100) if population > 0 else 0
             
-            # Risk weight (for PPS)
             size_weight = population * mean_risk
             
-            # Allocation reason
             if sampled > 0:
                 if mean_risk > 0.75:
                     reason = "High risk & large → prioritized"
@@ -1528,10 +1556,8 @@ When discussing with external auditors:
                 'reason': reason
             })
         
-        # Sort by size_weight descending
         report_data.sort(key=lambda x: x['size_weight'], reverse=True)
         
-        # Populate tree
         for data in report_data:
             self.stratum_report_tree.insert("", "end", text=data['stratum'],
                                            values=(
@@ -1647,7 +1673,7 @@ When discussing with external auditors:
             messagebox.showerror("Error", f"Export failed: {str(e)}")
     
     def export_all_results(self):
-        """Export all results (samples, out-of-scope, stratum report, insights)"""
+        """Export all results"""
         if not self.comparison_results:
             messagebox.showerror("Error", "Generate samples first")
             return
@@ -1797,7 +1823,7 @@ When discussing with external auditors:
             
             ax.bar(high_risk_methods, high_risk_data, color=['skyblue', 'orange', 'lightcoral'])
             ax.set_ylabel('High-Risk Capture %')
-            ax.set_title(f'High-Risk (>0.7) Record Capture ({high_risk_total:,} total)')
+            ax.set_title(f'High-Risk (>0.7) Record Capture')
             ax.set_ylim([0, 100])
             ax.grid(axis='y', alpha=0.3)
             
@@ -1824,21 +1850,29 @@ When discussing with external auditors:
             ax.set_ylim([0, 1])
             ax.grid(axis='y', alpha=0.3)
             
-            # Chart 6: Risk weight configuration
+            # Chart 6: Factors used
             ax = self.axes[1, 2]
-            weight_labels = ['Value', 'Product', 'Aging', 'Entity', 'Region', 'Reason']
-            weight_values = [
-                self.weight_vars['value'].get(),
-                self.weight_vars['product'].get(),
-                self.weight_vars['aging'].get(),
-                self.weight_vars['entity'].get(),
-                self.weight_vars['region'].get(),
-                self.weight_vars['reason'].get()
-            ]
+            factor_labels = []
+            factor_counts = []
             
-            colors = plt.cm.Set3(range(len(weight_labels)))
-            ax.pie(weight_values, labels=weight_labels, autopct='%1.1f%%', colors=colors, startangle=90)
-            ax.set_title('Risk Factor Weights')
+            if self.risk_config['value']['enabled']:
+                factor_labels.append('Value')
+                factor_counts.append(1)
+            if self.risk_config['aging']['enabled']:
+                factor_labels.append('Aging')
+                factor_counts.append(1)
+            if self.risk_config['reason']['enabled']:
+                factor_labels.append('Reason')
+                factor_counts.append(1)
+            
+            factor_labels.extend(['Entity', 'Region', 'Product'])
+            factor_counts.extend([1, 1, 1])
+            
+            colors = plt.cm.Set3(range(len(factor_labels)))
+            ax.bar(factor_labels, factor_counts, color=colors)
+            ax.set_ylabel('Active')
+            ax.set_title('Risk Factors Used')
+            ax.set_ylim([0, 1.5])
             
             self.fig.tight_layout()
             self.canvas.draw()
