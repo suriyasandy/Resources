@@ -1,41 +1,35 @@
 """
 ╔════════════════════════════════════════════════════════════════════════════════╗
-║         OMRC RISK-BASED SAMPLING TOOL v3.2.1 - COMPLETE PYTHON CODE           ║
-║         Dynamic Mandatory Column Selection + Data Preview                      ║
-║         All Features: Risk Analysis | Sampling | Export | Visualizations       ║
-║                    UI COMPLETE - Production Ready                              ║
+║         OMRC RISK-BASED SAMPLING TOOL v4.0 - SIMPLIFIED & STREAMLINED         ║
+║              Dynamic Column Selection + Data Preview + Numeric Coercion        ║
+║              4 SIMPLE TABS: Load | Analyze | Sample | Export                  ║
+║                    UI SIMPLIFIED - Production Ready                            ║
 ╚════════════════════════════════════════════════════════════════════════════════╝
 
-FILE: OMRC_RiskBasedSampling_v321_Working.py
-VERSION: 3.2.1 - Full features with Dynamic Column Selection
+FILE: OMRC_RiskBasedSampling_v400_Simplified.py
+VERSION: 4.0 - Simplified UI with fixed float/string error
 DATE: December 9, 2025
 STATUS: ✓ PRODUCTION READY
 
 CRITICAL FIXES:
+  ✓ Fixed '<' not supported between float and str error (numeric coercion)
   ✓ Dynamic mandatory column dropdowns (based on loaded data)
   ✓ Data preview table (shows first 50 rows)
-  ✓ Fixed length mismatch error (df.loc[index] instead of list extend)
-  ✓ Implemented Phase 1 (reserve small strata)
-  ✓ Implemented Phase 2 (risk-weight large strata)
-  ✓ Added Allocation Reason field (for audit trail)
-  ✓ Added within-stratum sampling (40/60 for large)
+  ✓ Simplified to 4 main tabs (user-friendly)
+  ✓ All analysis consolidated in single tabs
+  ✓ Robust anomaly detection with fallback
 
-UI FEATURES (9 TABS):
-  ✓ Tab 1: Data & Config (Load, Generate, Dynamic Dropdowns, Preview)
-  ✓ Tab 2: Risk Analysis (Phase 1/2)
-  ✓ Tab 3: Sampling Methods (Traditional, Risk-PPS, Hybrid)
-  ✓ Tab 4: Coverage Analysis
-  ✓ Tab 5: Stratum Report
-  ✓ Tab 6: Visualizations
-  ✓ Tab 7: Covered Strata Details
-  ✓ Tab 8: Missed Strata Details
-  ✓ Tab 9: Export Results
+UI FEATURES (4 TABS - STREAMLINED):
+  ✓ Tab 1: Load & Configure (Data loading, column selection, preview)
+  ✓ Tab 2: Analyze (Risk scores + Coverage in one view)
+  ✓ Tab 3: Sample & Compare (All sampling methods + charts)
+  ✓ Tab 4: Export & Results (All exports + detailed reports)
 
 INSTALLATION:
   pip install pandas numpy scikit-learn matplotlib seaborn openpyxl
 
 RUN:
-  python OMRC_RiskBasedSampling_v321_Working.py
+  python OMRC_RiskBasedSampling_v400_Simplified.py
 """
 
 import tkinter as tk
@@ -54,7 +48,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ═════════════════════════════════════════════════════════════════════════════
-# CORE SAMPLING CLASS - LOGIC FIXES ONLY
+# CORE SAMPLING CLASS
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OMRCRiskBasedSampling:
@@ -65,7 +59,7 @@ class OMRCRiskBasedSampling:
         self.stratum_columns = []
         self.samples = {}
         self.stratum_allocations = {}
-        self.results_dir = "Results_v321"
+        self.results_dir = "Results_v400"
         self.create_results_directory()
     
     def create_results_directory(self):
@@ -73,16 +67,24 @@ class OMRCRiskBasedSampling:
         if not os.path.exists(self.results_dir):
             os.makedirs(self.results_dir)
     
+    def coerce_numeric_columns(self, data):
+        """
+        FIX: Convert string-looking numeric columns to actual numeric type.
+        This prevents '<' not supported between float and str error.
+        """
+        data = data.copy()
+        for col in data.columns:
+            try:
+                converted = pd.to_numeric(data[col], errors='coerce')
+                # If conversion worked for most values, keep it
+                if converted.notna().sum() / len(data) > 0.5:
+                    data[col] = converted
+            except:
+                pass  # Keep original if conversion fails
+        return data
+    
     def calculate_dynamic_risk_scores(self, data, stratum_columns):
-        """
-        Calculate dynamic risk scores based on stratification structure.
-        
-        CRITICAL FIX:
-          ❌ OLD: risk_scores.extend([...]) then df['risk_score'] = risk_scores
-          ✅ NEW: df.loc[group.index, 'risk_score'] = risk_score
-          
-        This ensures every record gets a risk_score (no length mismatch).
-        """
+        """Calculate dynamic risk scores based on stratification structure"""
         data = data.copy()
         total_pop = len(data)
         
@@ -102,8 +104,6 @@ class OMRCRiskBasedSampling:
                 freq = N_h / total_pop
                 risk_h = math.log(max(N_h, 1)) * freq * 100
                 
-                # FIX #1: Use df.loc[index] for direct assignment
-                # This guarantees 100% record coverage with no length mismatch
                 data.loc[group.index, 'risk_score'] = risk_h
             
             # Verify all records have risk_score
@@ -116,13 +116,7 @@ class OMRCRiskBasedSampling:
             raise Exception(f"Error calculating risk scores: {str(e)}")
     
     def risk_stratified_pps_sampling(self, data, target_size):
-        """
-        Risk-stratified PPS sampling with two-phase allocation.
-        
-        PHASE 1: Reserve 1 sample per small stratum (population < 10)
-        PHASE 2: Allocate remaining budget to large strata by risk-weight
-        PHASE 3: Fine-tune to exact target size
-        """
+        """Risk-stratified PPS sampling with two-phase allocation"""
         target_size = int(target_size)
         data = data.copy()
         
@@ -140,9 +134,9 @@ class OMRCRiskBasedSampling:
                 stratum_allocations[name] = {
                     'population': N_h,
                     'is_small': True,
-                    'allocated': 1,  # Reserve 1
+                    'allocated': 1,
                     'group': group.copy(),
-                    'reason': f'Reserved (small stratum population {N_h})',
+                    'reason': f'Reserved (small stratum N={N_h})',
                     'risk_score': 0.0
                 }
                 total_reserved += 1
@@ -158,7 +152,7 @@ class OMRCRiskBasedSampling:
                     'is_small': False,
                     'weight': weight,
                     'group': group.copy(),
-                    'reason': 'Risk-weighted allocation (Phase 2)',
+                    'reason': 'Risk-weighted allocation',
                     'allocated': 0
                 }
                 total_weight_large += weight
@@ -167,7 +161,7 @@ class OMRCRiskBasedSampling:
         
         for name, info in stratum_allocations.items():
             if info['is_small']:
-                continue  # Already reserved
+                continue
             
             if total_weight_large > 0:
                 n_h = max(0, int((info['weight'] / total_weight_large) * remaining_budget))
@@ -180,7 +174,6 @@ class OMRCRiskBasedSampling:
         total_allocated = sum(info['allocated'] for info in stratum_allocations.values())
         
         if total_allocated < target_size:
-            # Underage: Add to largest strata first
             diff = target_size - total_allocated
             sorted_strata = sorted(
                 [(name, info) for name, info in stratum_allocations.items() 
@@ -197,7 +190,6 @@ class OMRCRiskBasedSampling:
                 diff -= can_add
         
         elif total_allocated > target_size:
-            # Overage: Remove from smallest strata first
             diff = total_allocated - target_size
             sorted_strata = sorted(
                 [(name, info) for name, info in stratum_allocations.items() 
@@ -224,20 +216,15 @@ class OMRCRiskBasedSampling:
                     samples.append(group)
                 else:
                     if info['is_small']:
-                        # Small stratum: Random 1 record
                         stratum_sample = group.sample(n=1, random_state=42)
                     else:
-                        # Large stratum: 40% high-risk + 60% random
                         high_risk_count = max(1, int(sample_size_h * 0.4))
-                        
                         group_sorted = group.sort_values('risk_score', ascending=False)
                         high_risk_sample = group_sorted.head(high_risk_count)
-                        
                         remaining = sample_size_h - len(high_risk_sample)
                         
                         if remaining > 0:
                             remaining_data = group[~group.index.isin(high_risk_sample.index)]
-                            
                             if len(remaining_data) > 0:
                                 random_sample = remaining_data.sample(
                                     n=min(remaining, len(remaining_data)),
@@ -252,57 +239,63 @@ class OMRCRiskBasedSampling:
                     if len(stratum_sample) > 0:
                         samples.append(stratum_sample)
         
-        # Combine all samples
         if samples:
             final_sample = pd.concat(samples).drop_duplicates()
             sample = final_sample.head(target_size).copy()
         else:
             sample = data.sample(n=min(target_size, len(data)), random_state=42)
         
-        # Store allocations for reporting
         self.stratum_allocations = stratum_allocations
-        
         return sample
     
     def traditional_random_sampling(self, data, target_size):
-        """Pure random sampling without stratification"""
+        """Pure random sampling"""
         return data.sample(n=min(int(target_size), len(data)), random_state=42)
     
     def hybrid_pps_anomaly_sampling(self, data, target_size):
         """
         Hybrid approach: 70% Risk-PPS + 20% Anomalies + 10% Random
+        FIX: Robust numeric coercion for anomaly detection
         """
         data = data.copy()
         target_size = int(target_size)
         
-        # Split budget
         pps_size = int(target_size * 0.70)
         anomaly_size = int(target_size * 0.20)
         random_size = target_size - pps_size - anomaly_size
         
-        # Get PPS samples
         pps_sample = self.risk_stratified_pps_sampling(data, pps_size)
-        
-        # Get anomaly samples
         remaining_data = data[~data.index.isin(pps_sample.index)]
         
         if len(remaining_data) > 0 and anomaly_size > 0:
             try:
-                # Isolation Forest for anomaly detection
-                feature_cols = [col for col in data.columns 
-                               if data[col].dtype in [np.float64, np.int64]]
+                # FIX: Robust numeric column detection with coercion
+                numeric_cols = []
+                for col in data.columns:
+                    try:
+                        converted = pd.to_numeric(remaining_data[col], errors='coerce')
+                        if converted.notna().sum() > 0:
+                            numeric_cols.append(col)
+                    except:
+                        pass
                 
-                if len(feature_cols) > 0:
-                    X = remaining_data[feature_cols].fillna(0).values
-                    iso_forest = IsolationForest(contamination=0.1, random_state=42)
-                    anomaly_scores = iso_forest.fit_predict(X)
+                if len(numeric_cols) > 0:
+                    # FIX: Convert ALL values to numeric before passing to IsolationForest
+                    X = remaining_data[numeric_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values
                     
-                    anomaly_indices = remaining_data.index[anomaly_scores == -1]
-                    
-                    if len(anomaly_indices) > 0:
-                        anomaly_sample = remaining_data.loc[
-                            anomaly_indices[:anomaly_size]
-                        ]
+                    # Only proceed if we have valid numeric data
+                    if X.shape[0] > 0 and X.shape[1] > 0:
+                        iso_forest = IsolationForest(contamination=0.1, random_state=42)
+                        anomaly_scores = iso_forest.fit_predict(X)
+                        anomaly_indices = remaining_data.index[anomaly_scores == -1]
+                        
+                        if len(anomaly_indices) > 0:
+                            anomaly_sample = remaining_data.loc[anomaly_indices[:anomaly_size]]
+                        else:
+                            anomaly_sample = remaining_data.sample(
+                                n=min(anomaly_size, len(remaining_data)),
+                                random_state=42
+                            )
                     else:
                         anomaly_sample = remaining_data.sample(
                             n=min(anomaly_size, len(remaining_data)),
@@ -313,7 +306,8 @@ class OMRCRiskBasedSampling:
                         n=min(anomaly_size, len(remaining_data)),
                         random_state=42
                     )
-            except:
+            except Exception as e:
+                # Fallback: use random sampling if anomaly detection fails
                 anomaly_sample = remaining_data.sample(
                     n=min(anomaly_size, len(remaining_data)),
                     random_state=42
@@ -321,7 +315,6 @@ class OMRCRiskBasedSampling:
         else:
             anomaly_sample = pd.DataFrame()
         
-        # Get random samples
         remaining_data2 = data[~data.index.isin(
             pd.concat([pps_sample, anomaly_sample]).index
         )]
@@ -334,9 +327,7 @@ class OMRCRiskBasedSampling:
         else:
             random_sample = pd.DataFrame()
         
-        # Combine
         hybrid_sample = pd.concat([pps_sample, anomaly_sample, random_sample])
-        
         return hybrid_sample.head(target_size)
     
     def analyze_coverage(self, data, sample):
@@ -348,7 +339,6 @@ class OMRCRiskBasedSampling:
         covered_strata = len(sample_groups)
         coverage_pct = (covered_strata / total_strata * 100) if total_strata > 0 else 0
         
-        # Identify missed strata
         data_strata = set(stratum_groups.groups.keys())
         sample_strata = set(sample_groups.groups.keys())
         missed_strata = data_strata - sample_strata
@@ -368,12 +358,10 @@ class OMRCRiskBasedSampling:
         
         try:
             for method, sample in samples_dict.items():
-                # Sample file
                 sample_file = f"{self.results_dir}/Sample_{method}_{timestamp}.csv"
                 sample.to_csv(sample_file, index=False)
                 exported_files.append(sample_file)
                 
-                # Out-of-scope file
                 out_of_scope = data[~data.index.isin(sample.index)]
                 oos_file = f"{self.results_dir}/OutOfScope_{method}_{timestamp}.csv"
                 out_of_scope.to_csv(oos_file, index=False)
@@ -385,16 +373,16 @@ class OMRCRiskBasedSampling:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# GUI APPLICATION - COMPLETE WITH DYNAMIC COLUMN SELECTION & DATA PREVIEW
+# GUI APPLICATION - SIMPLIFIED 4-TAB VERSION
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OMRCGUIApplication:
-    """GUI Application for OMRC Risk-Based Sampling Tool"""
+    """GUI Application for OMRC Risk-Based Sampling Tool - Simplified"""
     
     def __init__(self, root):
         self.root = root
-        self.root.title("OMRC Risk-Based Sampling Tool v3.2.1")
-        self.root.geometry("1400x800")
+        self.root.title("OMRC Risk-Based Sampling Tool v4.0")
+        self.root.geometry("1500x900")
         
         self.app = OMRCRiskBasedSampling()
         self.data = None
@@ -403,123 +391,108 @@ class OMRCGUIApplication:
         self.setup_ui()
     
     def setup_ui(self):
-        """Setup notebook tabs"""
+        """Setup 4 main tabs"""
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Tab 1: Data & Configuration
+        # Tab 1: Load & Configure
         self.tab1 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab1, text="Tab 1: Data & Config")
+        self.notebook.add(self.tab1, text="1️⃣  Load & Configure")
         self.setup_tab1()
         
-        # Tab 2: Risk Analysis
+        # Tab 2: Analyze
         self.tab2 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab2, text="Tab 2: Risk Analysis")
+        self.notebook.add(self.tab2, text="2️⃣  Analyze")
         self.setup_tab2()
         
-        # Tab 3: Sampling
+        # Tab 3: Sample & Compare
         self.tab3 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab3, text="Tab 3: Sampling")
+        self.notebook.add(self.tab3, text="3️⃣  Sample & Compare")
         self.setup_tab3()
         
-        # Tab 4: Coverage
+        # Tab 4: Export & Results
         self.tab4 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab4, text="Tab 4: Coverage")
+        self.notebook.add(self.tab4, text="4️⃣  Export & Results")
         self.setup_tab4()
-        
-        # Tab 5: Stratum Report
-        self.tab5 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab5, text="Tab 5: Stratum Report")
-        self.setup_tab5()
-        
-        # Tab 6: Visualizations
-        self.tab6 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab6, text="Tab 6: Visualizations")
-        self.setup_tab6()
-        
-        # Tab 7: Covered Strata
-        self.tab7 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab7, text="Tab 7: Covered Strata")
-        self.setup_tab7()
-        
-        # Tab 8: Missed Strata
-        self.tab8 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab8, text="Tab 8: Missed Strata")
-        self.setup_tab8()
-        
-        # Tab 9: Export Results
-        self.tab9 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab9, text="Tab 9: Export Results")
-        self.setup_tab9()
     
     def setup_tab1(self):
-        """Tab 1: Data Loading and Dynamic Column Selection with Preview"""
+        """Tab 1: Data Loading and Column Selection"""
         main_frame = ttk.Frame(self.tab1)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Data Loading Frame
-        loading_frame = ttk.LabelFrame(main_frame, text="Step 1: Load Data", padding=10)
+        # ═══════════════════════════════════════════════════════════════════
+        # SECTION 1: DATA LOADING
+        # ═══════════════════════════════════════════════════════════════════
+        
+        loading_frame = ttk.LabelFrame(main_frame, text="📁 Step 1: Load Data", padding=10)
         loading_frame.pack(fill='x', pady=(0, 10))
         
-        ttk.Button(loading_frame, text="Load CSV/Excel File", 
+        button_frame = ttk.Frame(loading_frame)
+        button_frame.pack(fill='x', pady=5)
+        
+        ttk.Button(button_frame, text="📂 Load CSV/Excel File", 
                   command=self.load_data).pack(side='left', padx=5)
-        ttk.Button(loading_frame, text="Generate Sample Data", 
+        ttk.Button(button_frame, text="🎲 Generate Sample Data", 
                   command=self.generate_sample_data).pack(side='left', padx=5)
         
-        self.data_info_label = ttk.Label(loading_frame, text="No data loaded", 
-                                         font=('Arial', 10, 'bold'), foreground='red')
+        self.data_info_label = ttk.Label(loading_frame, text="⏳ No data loaded", 
+                                         font=('Arial', 11, 'bold'), foreground='red')
         self.data_info_label.pack(side='left', padx=20)
         
-        # Column Selection Frame
-        column_frame = ttk.LabelFrame(main_frame, text="Step 2: Select Stratification Columns", padding=10)
+        # ═══════════════════════════════════════════════════════════════════
+        # SECTION 2: COLUMN SELECTION
+        # ═══════════════════════════════════════════════════════════════════
+        
+        column_frame = ttk.LabelFrame(main_frame, text="🔍 Step 2: Select Stratification Columns", padding=10)
         column_frame.pack(fill='x', pady=5)
         
-        # Mandatory Columns - Column 1
-        ttk.Label(column_frame, text="Column 1:*", font=('Arial', 9, 'bold')).grid(row=0, column=0, sticky='w', padx=5)
+        # Grid layout for 3 mandatory columns
+        grid_frame = ttk.Frame(column_frame)
+        grid_frame.pack(fill='x', pady=5)
+        
+        ttk.Label(grid_frame, text="Column 1:*", font=('Arial', 9, 'bold')).grid(row=0, column=0, sticky='w', padx=5)
         self.col1_var = tk.StringVar(value="")
-        self.col1_combo = ttk.Combobox(column_frame, textvariable=self.col1_var, width=20, state='readonly')
+        self.col1_combo = ttk.Combobox(grid_frame, textvariable=self.col1_var, width=22, state='readonly')
         self.col1_combo.grid(row=0, column=1, padx=5, sticky='w')
         
-        # Mandatory Columns - Column 2
-        ttk.Label(column_frame, text="Column 2:*", font=('Arial', 9, 'bold')).grid(row=0, column=2, sticky='w', padx=(20, 5))
+        ttk.Label(grid_frame, text="Column 2:*", font=('Arial', 9, 'bold')).grid(row=0, column=2, sticky='w', padx=(20, 5))
         self.col2_var = tk.StringVar(value="")
-        self.col2_combo = ttk.Combobox(column_frame, textvariable=self.col2_var, width=20, state='readonly')
+        self.col2_combo = ttk.Combobox(grid_frame, textvariable=self.col2_var, width=22, state='readonly')
         self.col2_combo.grid(row=0, column=3, padx=5, sticky='w')
         
-        # Mandatory Columns - Column 3
-        ttk.Label(column_frame, text="Column 3:*", font=('Arial', 9, 'bold')).grid(row=1, column=0, sticky='w', padx=5)
+        ttk.Label(grid_frame, text="Column 3:*", font=('Arial', 9, 'bold')).grid(row=1, column=0, sticky='w', padx=5, pady=(5, 0))
         self.col3_var = tk.StringVar(value="")
-        self.col3_combo = ttk.Combobox(column_frame, textvariable=self.col3_var, width=20, state='readonly')
-        self.col3_combo.grid(row=1, column=1, padx=5, sticky='w')
+        self.col3_combo = ttk.Combobox(grid_frame, textvariable=self.col3_var, width=22, state='readonly')
+        self.col3_combo.grid(row=1, column=1, padx=5, sticky='w', pady=(5, 0))
         
         # Validation Status
-        self.column_status = ttk.Label(column_frame, text="⚠ Select all 3 mandatory columns", 
-                                       foreground='red', font=('Arial', 9, 'bold'))
-        self.column_status.grid(row=2, column=0, columnspan=4, pady=10)
+        self.column_status = ttk.Label(column_frame, text="⚠️  Select all 3 mandatory columns", 
+                                       foreground='red', font=('Arial', 10, 'bold'))
+        self.column_status.pack(pady=10)
         
-        # Additional Columns Frame
-        additional_frame = ttk.LabelFrame(main_frame, text="Additional Columns (Optional)", padding=10)
+        # Additional Columns
+        additional_frame = ttk.Frame(column_frame)
         additional_frame.pack(fill='x', pady=5)
         
-        self.additional_cols_label = ttk.Label(additional_frame, text="None selected", foreground='gray')
-        self.additional_cols_label.pack(anchor='w', pady=5)
+        self.additional_cols_label = ttk.Label(additional_frame, text="📌 Additional: None selected", foreground='gray')
+        self.additional_cols_label.pack(anchor='w', pady=3)
         
-        ttk.Button(additional_frame, text="Select Additional Columns", 
-                  command=self.open_column_selector).pack(anchor='w', pady=5)
+        ttk.Button(additional_frame, text="➕ Add Optional Columns", 
+                  command=self.open_column_selector).pack(anchor='w', pady=3)
         
-        # Data Preview Frame
-        preview_frame = ttk.LabelFrame(main_frame, text="Data Preview (First 50 Rows)", padding=10)
+        # ═══════════════════════════════════════════════════════════════════
+        # SECTION 3: DATA PREVIEW
+        # ═══════════════════════════════════════════════════════════════════
+        
+        preview_frame = ttk.LabelFrame(main_frame, text="📋 Data Preview (First 50 Rows)", padding=10)
         preview_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        # Create frame for treeview and scrollbars
         tree_frame = ttk.Frame(preview_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Scrollbars
         scrollbar_y = ttk.Scrollbar(tree_frame, orient="vertical")
         scrollbar_x = ttk.Scrollbar(tree_frame, orient="horizontal")
         
-        # Treeview
         self.tree = ttk.Treeview(tree_frame, yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
         scrollbar_y.config(command=self.tree.yview)
         scrollbar_x.config(command=self.tree.xview)
@@ -531,165 +504,102 @@ class OMRCGUIApplication:
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
     
-    def open_column_selector(self):
-        """Open dialog to select additional stratification columns"""
-        if self.data is None:
-            messagebox.showerror("Error", "Load data first")
-            return
-        
-        mandatory_cols = [col for col in [self.col1_var.get(), self.col2_var.get(), self.col3_var.get()]
-                         if col.strip() != ""]
-        available_cols = [col for col in self.data.columns if col not in mandatory_cols]
-        
-        dialog = Toplevel(self.root)
-        dialog.title("Select Additional Stratification Columns")
-        dialog.geometry("500x400")
-        
-        ttk.Label(dialog, text="Select additional columns (Ctrl/Cmd for multiple):", 
-                 font=('Arial', 10, 'bold')).pack(pady=10)
-        
-        frame = ttk.Frame(dialog)
-        frame.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        scrollbar = ttk.Scrollbar(frame)
-        scrollbar.pack(side='right', fill='y')
-        
-        listbox = Listbox(frame, selectmode=MULTIPLE, yscrollcommand=scrollbar.set, font=('Arial', 10))
-        listbox.pack(side='left', fill='both', expand=True)
-        scrollbar.config(command=listbox.yview)
-        
-        for col in available_cols:
-            listbox.insert('end', col)
-        
-        for i, col in enumerate(available_cols):
-            if col in self.selected_additional_columns:
-                listbox.selection_set(i)
-        
-        def confirm():
-            selected = listbox.curselection()
-            self.selected_additional_columns = [available_cols[i] for i in selected]
-            
-            if self.selected_additional_columns:
-                preview = ', '.join(self.selected_additional_columns[:3])
-                if len(self.selected_additional_columns) > 3:
-                    preview += '...'
-                self.additional_cols_label.config(
-                    text=f"Selected {len(self.selected_additional_columns)}: {preview}",
-                    foreground='blue'
-                )
-            else:
-                self.additional_cols_label.config(text="None selected", foreground='gray')
-            dialog.destroy()
-        
-        ttk.Button(dialog, text="Confirm", command=confirm).pack(pady=10)
-    
-    def update_column_dropdowns(self):
-        """Update dropdown options with loaded data columns"""
-        if self.data is None:
-            return
-        
-        columns = [""] + list(self.data.columns)
-        
-        self.col1_combo['values'] = columns
-        self.col2_combo['values'] = columns
-        self.col3_combo['values'] = columns
-    
-    def update_data_preview(self):
-        """Update data preview table with first 50 rows"""
-        if self.data is None:
-            return
-        
-        # Clear existing items
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        # Get first 10 columns for preview (or all if less than 10)
-        display_cols = list(self.data.columns)[:10]
-        
-        # Configure columns
-        self.tree["columns"] = display_cols
-        self.tree["show"] = "headings"
-        
-        # Define column headings and widths
-        for col in display_cols:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=120, anchor='center')
-        
-        # Insert first 50 rows
-        for idx, (_, row) in enumerate(self.data.head(50).iterrows()):
-            values = [str(row[col])[:50] for col in display_cols]  # Limit text to 50 chars
-            self.tree.insert("", "end", values=values)
-    
     def setup_tab2(self):
-        """Tab 2: Risk Analysis"""
-        frame = ttk.LabelFrame(self.tab2, text="Dynamic Risk Analysis", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        """Tab 2: Risk Analysis & Coverage"""
+        main_frame = ttk.Frame(self.tab2)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        ttk.Label(frame, text="Phase 1: Identify small strata (population < 10)",
-                 foreground="green", font=("Arial", 10, "bold")).pack(pady=5)
-        ttk.Label(frame, text="Phase 2: Risk-weight large strata allocation",
-                 foreground="green", font=("Arial", 10, "bold")).pack(pady=5)
+        # Button frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill='x', pady=(0, 10))
         
-        ttk.Button(frame, text="Calculate Dynamic Risk Scores",
-                  command=self.calculate_risk).pack(pady=10)
+        ttk.Button(button_frame, text="🔬 Calculate Risk Scores", 
+                  command=self.calculate_risk).pack(side='left', padx=5, pady=5)
         
-        self.risk_text = tk.Text(frame, height=20, width=100)
-        self.risk_text.pack(fill=tk.BOTH, expand=True, pady=5)
+        # Notebook for analysis and coverage
+        analysis_notebook = ttk.Notebook(main_frame)
+        analysis_notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Risk Analysis tab
+        risk_frame = ttk.Frame(analysis_notebook)
+        analysis_notebook.add(risk_frame, text="Risk Analysis")
+        
+        self.risk_text = tk.Text(risk_frame, height=30, width=150, font=('Courier', 9))
+        self.risk_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Coverage Analysis tab
+        coverage_frame = ttk.Frame(analysis_notebook)
+        analysis_notebook.add(coverage_frame, text="Coverage Summary")
+        
+        self.coverage_text = tk.Text(coverage_frame, height=30, width=150, font=('Courier', 9))
+        self.coverage_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     
     def setup_tab3(self):
-        """Tab 3: Sampling Methods"""
-        frame = ttk.LabelFrame(self.tab3, text="Sampling Parameters", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        """Tab 3: Sampling Methods & Visualizations"""
+        main_frame = ttk.Frame(self.tab3)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Parameters
-        ttk.Label(frame, text="Confidence Level (%)").pack()
+        # ═══════════════════════════════════════════════════════════════════
+        # PARAMETERS FRAME
+        # ═══════════════════════════════════════════════════════════════════
+        
+        param_frame = ttk.LabelFrame(main_frame, text="⚙️  Sampling Parameters", padding=10)
+        param_frame.pack(fill='x', pady=(0, 10))
+        
+        # Parameters in grid
+        grid = ttk.Frame(param_frame)
+        grid.pack(fill='x')
+        
+        ttk.Label(grid, text="Confidence Level (%):").grid(row=0, column=0, sticky='w', padx=5, pady=5)
         self.confidence_var = tk.DoubleVar(value=95)
-        ttk.Spinbox(frame, from_=80, to=99, textvariable=self.confidence_var).pack()
+        ttk.Spinbox(grid, from_=80, to=99, textvariable=self.confidence_var, width=10).grid(row=0, column=1, padx=5, sticky='w')
         
-        ttk.Label(frame, text="Margin of Error").pack()
+        ttk.Label(grid, text="Margin of Error:").grid(row=0, column=2, sticky='w', padx=(20, 5), pady=5)
         self.margin_var = tk.DoubleVar(value=0.05)
-        ttk.Spinbox(frame, from_=0.01, to=0.20, increment=0.01, 
-                   textvariable=self.margin_var).pack()
+        ttk.Spinbox(grid, from_=0.01, to=0.20, increment=0.01, textvariable=self.margin_var, width=10).grid(row=0, column=3, padx=5, sticky='w')
         
-        ttk.Label(frame, text="Error Rate").pack()
+        ttk.Label(grid, text="Error Rate:").grid(row=0, column=4, sticky='w', padx=(20, 5), pady=5)
         self.error_var = tk.DoubleVar(value=0.15)
-        ttk.Spinbox(frame, from_=0.01, to=0.50, increment=0.01,
-                   textvariable=self.error_var).pack()
+        ttk.Spinbox(grid, from_=0.01, to=0.50, increment=0.01, textvariable=self.error_var, width=10).grid(row=0, column=5, padx=5, sticky='w')
         
         # Methods selection
-        ttk.Label(frame, text="Select Methods").pack()
+        methods_frame = ttk.LabelFrame(param_frame, text="🎯 Select Sampling Methods", padding=10)
+        methods_frame.pack(fill='x', pady=10)
+        
         self.traditional_var = tk.BooleanVar(value=True)
         self.risk_pps_var = tk.BooleanVar(value=True)
         self.hybrid_var = tk.BooleanVar(value=False)
         
-        ttk.Checkbutton(frame, text="Traditional Random", 
-                       variable=self.traditional_var).pack()
-        ttk.Checkbutton(frame, text="Risk-Stratified PPS (Recommended)",
-                       variable=self.risk_pps_var).pack()
-        ttk.Checkbutton(frame, text="Hybrid (PPS + Anomalies)",
-                       variable=self.hybrid_var).pack()
+        ttk.Checkbutton(methods_frame, text="✓ Traditional Random Sampling", 
+                       variable=self.traditional_var).pack(anchor='w', padx=10, pady=3)
+        ttk.Checkbutton(methods_frame, text="✓ Risk-Stratified PPS (Recommended)", 
+                       variable=self.risk_pps_var).pack(anchor='w', padx=10, pady=3)
+        ttk.Checkbutton(methods_frame, text="✓ Hybrid (PPS + Anomalies)", 
+                       variable=self.hybrid_var).pack(anchor='w', padx=10, pady=3)
         
         # Generate button
-        ttk.Button(frame, text="Generate & Compare Samples",
+        ttk.Button(param_frame, text="▶️  Generate & Compare Samples", 
                   command=self.generate_samples).pack(pady=10)
         
-        self.sampling_text = tk.Text(frame, height=15, width=100)
-        self.sampling_text.pack(fill=tk.BOTH, expand=True)
-    
-    def setup_tab4(self):
-        """Tab 4: Coverage Analysis"""
-        frame = ttk.LabelFrame(self.tab4, text="Coverage Analysis", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        # ═══════════════════════════════════════════════════════════════════
+        # RESULTS NOTEBOOK
+        # ═══════════════════════════════════════════════════════════════════
         
-        self.coverage_text = tk.Text(frame, height=25, width=100)
-        self.coverage_text.pack(fill=tk.BOTH, expand=True)
-    
-    def setup_tab5(self):
-        """Tab 5: Stratum Report"""
-        frame = ttk.LabelFrame(self.tab5, text="Stratum-Level Report", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        results_notebook = ttk.Notebook(main_frame)
+        results_notebook.pack(fill=tk.BOTH, expand=True)
         
-        self.stratum_tree = ttk.Treeview(frame, height=20, columns=(
+        # Sampling Results tab
+        sampling_frame = ttk.Frame(results_notebook)
+        results_notebook.add(sampling_frame, text="Sampling Results")
+        
+        self.sampling_text = tk.Text(sampling_frame, height=25, width=150, font=('Courier', 9))
+        self.sampling_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Stratum Report tab
+        stratum_frame = ttk.Frame(results_notebook)
+        results_notebook.add(stratum_frame, text="Stratum Report")
+        
+        self.stratum_tree = ttk.Treeview(stratum_frame, height=20, columns=(
             'Stratum', 'Population', 'Risk Score', 'Allocated', 'Reason'
         ))
         self.stratum_tree.heading('#0', text='#')
@@ -699,54 +609,63 @@ class OMRCGUIApplication:
         self.stratum_tree.heading('Allocated', text='Allocated')
         self.stratum_tree.heading('Reason', text='Allocation Reason')
         
-        self.stratum_tree.pack(fill=tk.BOTH, expand=True)
+        self.stratum_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Charts tab
+        charts_frame = ttk.Frame(results_notebook)
+        results_notebook.add(charts_frame, text="Charts & Visualizations")
+        
+        button_frame = ttk.Frame(charts_frame)
+        button_frame.pack(fill='x', padx=5, pady=5)
+        
+        ttk.Button(button_frame, text="📊 Generate Charts", 
+                  command=self.generate_charts).pack(side='left', padx=5)
+        
+        self.chart_frame = ttk.Frame(charts_frame)
+        self.chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     
-    def setup_tab6(self):
-        """Tab 6: Visualizations"""
-        frame = ttk.LabelFrame(self.tab6, text="Comparison Charts", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+    def setup_tab4(self):
+        """Tab 4: Export & Detailed Results"""
+        main_frame = ttk.Frame(self.tab4)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        ttk.Button(frame, text="Generate Charts",
-                  command=self.generate_charts).pack(pady=5)
+        # Export buttons frame
+        export_button_frame = ttk.LabelFrame(main_frame, text="💾 Export Options", padding=10)
+        export_button_frame.pack(fill='x', pady=(0, 10))
         
-        self.chart_frame = ttk.Frame(frame)
-        self.chart_frame.pack(fill=tk.BOTH, expand=True)
-    
-    def setup_tab7(self):
-        """Tab 7: Covered Strata Details"""
-        frame = ttk.LabelFrame(self.tab7, text="Covered Strata Details", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Button(export_button_frame, text="📥 Export All Results", 
+                  command=self.export_all_results).pack(side='left', padx=5, pady=5)
+        ttk.Button(export_button_frame, text="📥 Export Traditional", 
+                  command=lambda: self.export_single_method('Traditional_Random')).pack(side='left', padx=5, pady=5)
+        ttk.Button(export_button_frame, text="📥 Export Risk-PPS", 
+                  command=lambda: self.export_single_method('Risk_PPS')).pack(side='left', padx=5, pady=5)
+        ttk.Button(export_button_frame, text="📥 Export Hybrid", 
+                  command=lambda: self.export_single_method('Hybrid')).pack(side='left', padx=5, pady=5)
         
-        self.covered_text = tk.Text(frame, height=25, width=100)
-        self.covered_text.pack(fill=tk.BOTH, expand=True)
-    
-    def setup_tab8(self):
-        """Tab 8: Missed Strata Details"""
-        frame = ttk.LabelFrame(self.tab8, text="Missed Strata Details", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        # Results notebook
+        results_notebook = ttk.Notebook(main_frame)
+        results_notebook.pack(fill=tk.BOTH, expand=True)
         
-        self.missed_text = tk.Text(frame, height=25, width=100)
-        self.missed_text.pack(fill=tk.BOTH, expand=True)
-    
-    def setup_tab9(self):
-        """Tab 9: Export Results"""
-        frame = ttk.LabelFrame(self.tab9, text="Export Results", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+        # Export status tab
+        export_frame = ttk.Frame(results_notebook)
+        results_notebook.add(export_frame, text="Export Status")
         
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(fill='x', pady=10)
+        self.export_text = tk.Text(export_frame, height=25, width=150, font=('Courier', 9))
+        self.export_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        ttk.Button(button_frame, text="Export All Results", 
-                  command=self.export_all_results).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="Export Traditional Sample", 
-                  command=lambda: self.export_single_method('Traditional_Random')).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="Export Risk-PPS Sample", 
-                  command=lambda: self.export_single_method('Risk_PPS')).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="Export Hybrid Sample", 
-                  command=lambda: self.export_single_method('Hybrid')).pack(side='left', padx=5)
+        # Covered Strata tab
+        covered_frame = ttk.Frame(results_notebook)
+        results_notebook.add(covered_frame, text="Covered Strata")
         
-        self.export_text = tk.Text(frame, height=20, width=100)
-        self.export_text.pack(fill=tk.BOTH, expand=True)
+        self.covered_text = tk.Text(covered_frame, height=25, width=150, font=('Courier', 9))
+        self.covered_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Missed Strata tab
+        missed_frame = ttk.Frame(results_notebook)
+        results_notebook.add(missed_frame, text="Missed Strata")
+        
+        self.missed_text = tk.Text(missed_frame, height=25, width=150, font=('Courier', 9))
+        self.missed_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     
     # ─────────────────────────────────────────────────────────────────────────
     # CALLBACKS
@@ -761,14 +680,16 @@ class OMRCGUIApplication:
             try:
                 self.data = pd.read_csv(file_path) if file_path.endswith('.csv') \
                            else pd.read_excel(file_path)
+                
+                # FIX: Coerce numeric columns
+                self.data = self.app.coerce_numeric_columns(self.data)
                 self.app.data = self.data
                 
-                # Update dropdowns and preview
                 self.update_column_dropdowns()
                 self.update_data_preview()
                 
                 self.data_info_label.config(
-                    text=f"✓ Loaded: {len(self.data):,} records | {len(self.data.columns)} columns",
+                    text=f"✅ Loaded: {len(self.data):,} records | {len(self.data.columns)} columns",
                     foreground='green'
                 )
             except Exception as e:
@@ -796,11 +717,9 @@ class OMRCGUIApplication:
         self.data = pd.DataFrame(data)
         self.app.data = self.data
         
-        # Update dropdowns and preview
         self.update_column_dropdowns()
         self.update_data_preview()
         
-        # Pre-select columns
         self.col1_var.set("Entity")
         self.col2_var.set("Region")
         self.col3_var.set("Product")
@@ -808,59 +727,127 @@ class OMRCGUIApplication:
         total_strata = len(self.data.groupby(['Entity', 'Region', 'Product']))
         
         self.data_info_label.config(
-            text=f"✓ Generated: {len(self.data):,} records | {total_strata:,} strata",
+            text=f"✅ Generated: {len(self.data):,} records | {total_strata:,} strata",
             foreground='green'
         )
     
+    def update_column_dropdowns(self):
+        """Update dropdown options"""
+        if self.data is None:
+            return
+        
+        columns = [""] + list(self.data.columns)
+        self.col1_combo['values'] = columns
+        self.col2_combo['values'] = columns
+        self.col3_combo['values'] = columns
+    
+    def update_data_preview(self):
+        """Update data preview"""
+        if self.data is None:
+            return
+        
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        display_cols = list(self.data.columns)[:10]
+        
+        self.tree["columns"] = display_cols
+        self.tree["show"] = "headings"
+        
+        for col in display_cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=120, anchor='center')
+        
+        for idx, (_, row) in enumerate(self.data.head(50).iterrows()):
+            values = [str(row[col])[:50] for col in display_cols]
+            self.tree.insert("", "end", values=values)
+    
+    def open_column_selector(self):
+        """Open column selector dialog"""
+        if self.data is None:
+            messagebox.showerror("Error", "Load data first")
+            return
+        
+        mandatory_cols = [col for col in [self.col1_var.get(), self.col2_var.get(), self.col3_var.get()]
+                         if col.strip() != ""]
+        available_cols = [col for col in self.data.columns if col not in mandatory_cols]
+        
+        dialog = Toplevel(self.root)
+        dialog.title("Select Additional Columns")
+        dialog.geometry("500x400")
+        
+        ttk.Label(dialog, text="Select additional columns (Ctrl+Click for multiple):", 
+                 font=('Arial', 10, 'bold')).pack(pady=10)
+        
+        frame = ttk.Frame(dialog)
+        frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side='right', fill='y')
+        
+        listbox = Listbox(frame, selectmode=MULTIPLE, yscrollcommand=scrollbar.set, font=('Arial', 10))
+        listbox.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        for col in available_cols:
+            listbox.insert('end', col)
+        
+        for i, col in enumerate(available_cols):
+            if col in self.selected_additional_columns:
+                listbox.selection_set(i)
+        
+        def confirm():
+            selected = listbox.curselection()
+            self.selected_additional_columns = [available_cols[i] for i in selected]
+            
+            if self.selected_additional_columns:
+                preview = ', '.join(self.selected_additional_columns[:2])
+                if len(self.selected_additional_columns) > 2:
+                    preview += '...'
+                self.additional_cols_label.config(
+                    text=f"📌 Additional: {len(self.selected_additional_columns)} selected ({preview})",
+                    foreground='blue'
+                )
+            else:
+                self.additional_cols_label.config(text="📌 Additional: None selected", foreground='gray')
+            dialog.destroy()
+        
+        ttk.Button(dialog, text="✅ Confirm", command=confirm).pack(pady=10)
+    
     def validate_mandatory_columns(self):
-        """Validate mandatory column selection"""
+        """Validate column selection"""
         col1_sel = self.col1_var.get().strip()
         col2_sel = self.col2_var.get().strip()
         col3_sel = self.col3_var.get().strip()
         
         all_selected = col1_sel != "" and col2_sel != "" and col3_sel != ""
         
-        # Check for duplicates
         if all_selected and len({col1_sel, col2_sel, col3_sel}) != 3:
-            self.column_status.config(
-                text="⚠ All columns must be different!", 
-                foreground='red'
-            )
+            self.column_status.config(text="⚠️  All columns must be different!", foreground='red')
             return False
         
         if all_selected:
-            self.column_status.config(
-                text="✓ All mandatory columns selected", 
-                foreground='green'
-            )
+            self.column_status.config(text="✅ All mandatory columns selected", foreground='green')
         else:
-            missing = []
-            if col1_sel == "": missing.append("Column 1")
-            if col2_sel == "": missing.append("Column 2")
-            if col3_sel == "": missing.append("Column 3")
-            
-            self.column_status.config(
-                text=f"⚠ Missing: {', '.join(missing)}", 
-                foreground='red'
-            )
+            self.column_status.config(text="⚠️  Select all 3 mandatory columns", foreground='red')
         
         return all_selected
     
     def update_stratum_columns(self):
-        """Update stratum columns based on selection"""
+        """Update stratum columns"""
         cols = [self.col1_var.get(), self.col2_var.get(), self.col3_var.get()]
         cols = [c for c in cols if c.strip() != ""]
         cols.extend(self.selected_additional_columns)
         self.app.stratum_columns = cols
     
     def calculate_risk(self):
-        """Calculate dynamic risk scores"""
+        """Calculate risk scores"""
         if self.data is None:
-            messagebox.showerror("Error", "Please load data first")
+            messagebox.showerror("Error", "Load data first")
             return
         
         if not self.validate_mandatory_columns():
-            messagebox.showerror("Error", "Please select all mandatory columns")
+            messagebox.showerror("Error", "Select all 3 mandatory columns")
             return
         
         self.update_stratum_columns()
@@ -868,17 +855,12 @@ class OMRCGUIApplication:
         try:
             self.risk_text.delete('1.0', tk.END)
             
-            data_with_risk = self.app.calculate_dynamic_risk_scores(
-                self.data, self.app.stratum_columns
-            )
+            data_with_risk = self.app.calculate_dynamic_risk_scores(self.data, self.app.stratum_columns)
             self.data = data_with_risk
             self.app.data = data_with_risk
             
-            # Display insights
             stratum_groups = data_with_risk.groupby(self.app.stratum_columns, observed=True)
             total_strata = len(stratum_groups)
-            
-            # Count small strata
             small_strata = sum(1 for name, group in stratum_groups if len(group) < 10)
             large_strata = total_strata - small_strata
             
@@ -899,7 +881,7 @@ PHASE 1 (Identification):
 
 PHASE 2 (Risk-Weight Allocation):
   ✓ Large strata identified: {large_strata:,}
-  ✓ Remaining budget for Cochran: {1247 - small_strata:,} samples
+  ✓ Remaining budget: {max(0, 1247 - small_strata):,} samples
 
 RISK SCORE FORMULA:
   Risk_h = ln(N_h) × (N_h / Total_Pop) × 100
@@ -907,7 +889,6 @@ RISK SCORE FORMULA:
 TOP 10 HIGHEST RISK STRATA:
 """
             
-            # Get top 10 risk strata
             stratum_risks = []
             for name, group in stratum_groups:
                 risk_score = group['risk_score'].iloc[0] if len(group) > 0 else 0
@@ -918,7 +899,7 @@ TOP 10 HIGHEST RISK STRATA:
             for i, (name, pop, risk) in enumerate(stratum_risks[:10], 1):
                 output += f"\n{i:2d}. {str(name)[:40]:40s} | Pop: {pop:6d} | Risk: {risk:8.2f}"
             
-            output += f"\n\n✓ Risk scores calculated successfully for all {len(data_with_risk):,} records"
+            output += f"\n\n✓ Risk scores calculated for all {len(data_with_risk):,} records"
             
             self.risk_text.insert('1.0', output)
             
@@ -926,18 +907,15 @@ TOP 10 HIGHEST RISK STRATA:
             messagebox.showerror("Error", f"Risk calculation failed: {str(e)}")
     
     def generate_samples(self):
-        """Generate samples using selected methods"""
+        """Generate samples"""
         if self.data is None:
-            messagebox.showerror("Error", "Please calculate risk scores first")
+            messagebox.showerror("Error", "Calculate risk scores first")
             return
         
         try:
-            # Calculate Cochran sample size
             confidence = self.confidence_var.get() / 100
             margin = self.margin_var.get()
             error_rate = self.error_var.get()
-            
-            # Cochran formula
             z_score = 1.96 if confidence == 0.95 else 2.576
             n = int(((z_score ** 2) * error_rate * (1 - error_rate)) / (margin ** 2))
             
@@ -948,14 +926,11 @@ TOP 10 HIGHEST RISK STRATA:
 ║                    SAMPLING RESULTS COMPARISON                            ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
-SAMPLE SIZE CALCULATION (Cochran Formula):
-  Confidence Level: {self.confidence_var.get()}%
-  Margin of Error: {margin}
-  Error Rate: {error_rate}
-  Z-Score: {z_score}
-  Sample Size = {n:,} records
+SAMPLE SIZE (Cochran Formula):
+  Confidence: {self.confidence_var.get()}% | Margin: {margin} | Error Rate: {error_rate}
+  Z-Score: {z_score} | Sample Size: {n:,} records
 
-─────────────────────────────────────────────────────────────────────────────
+{'─' * 79}
 """
             
             samples_dict = {}
@@ -968,11 +943,8 @@ SAMPLE SIZE CALCULATION (Cochran Formula):
                 coverage_dict['Traditional_Random'] = coverage
                 
                 output += f"""
-TRADITIONAL RANDOM SAMPLING:
-  Sample Size: {len(trad_sample):,}
-  Strata Covered: {coverage['covered_strata']:,} / {coverage['total_strata']:,}
-  Coverage: {coverage['coverage_pct']:.1f}%
-  Strata Missed: {coverage['missed_count']:,}
+TRADITIONAL RANDOM:
+  Size: {len(trad_sample):,} | Covered: {coverage['covered_strata']:,}/{coverage['total_strata']:,} | Coverage: {coverage['coverage_pct']:.1f}%
 """
             
             if self.risk_pps_var.get():
@@ -983,11 +955,8 @@ TRADITIONAL RANDOM SAMPLING:
                 
                 output += f"""
 RISK-STRATIFIED PPS (RECOMMENDED):
-  Sample Size: {len(pps_sample):,}
-  Strata Covered: {coverage['covered_strata']:,} / {coverage['total_strata']:,}
-  Coverage: {coverage['coverage_pct']:.1f}%
-  Strata Missed: {coverage['missed_count']:,}
-  ✓ 100% small strata coverage (audit requirement met!)
+  Size: {len(pps_sample):,} | Covered: {coverage['covered_strata']:,}/{coverage['total_strata']:,} | Coverage: {coverage['coverage_pct']:.1f}%
+  ✓ Phase 1 small strata reserved | Phase 2 risk-weighted allocation
 """
             
             if self.hybrid_var.get():
@@ -998,12 +967,8 @@ RISK-STRATIFIED PPS (RECOMMENDED):
                 
                 output += f"""
 HYBRID (PPS + ANOMALIES):
-  Sample Size: {len(hybrid_sample):,} (+30% vs Cochran)
+  Size: {len(hybrid_sample):,} (+30%) | Covered: {coverage['covered_strata']:,}/{coverage['total_strata']:,} | Coverage: {coverage['coverage_pct']:.1f}%
   Composition: 70% Risk-PPS + 20% Anomalies + 10% Random
-  Strata Covered: {coverage['covered_strata']:,} / {coverage['total_strata']:,}
-  Coverage: {coverage['coverage_pct']:.1f}%
-  Strata Missed: {coverage['missed_count']:,}
-  ✓ Maximum detection power for high-risk environments
 """
             
             output += f"\n{'─' * 79}\n✓ Samples generated successfully\n"
@@ -1013,70 +978,46 @@ HYBRID (PPS + ANOMALIES):
             self.samples_dict = samples_dict
             self.coverage_dict = coverage_dict
             
-            # Update all tabs
-            self.show_coverage_analysis()
-            self.show_covered_missed_strata()
             self.show_stratum_report()
+            self.show_covered_missed_strata()
+            self.show_coverage_analysis()
             
         except Exception as e:
             messagebox.showerror("Error", f"Sampling failed: {str(e)}")
     
-    def show_coverage_analysis(self):
-        """Display coverage analysis"""
-        if not hasattr(self, 'coverage_dict'):
+    def show_stratum_report(self):
+        """Show stratum report"""
+        if not hasattr(self, 'samples_dict') or 'Risk_PPS' not in self.samples_dict:
             return
         
-        self.coverage_text.delete('1.0', tk.END)
+        for item in self.stratum_tree.get_children():
+            self.stratum_tree.delete(item)
         
-        output = """
-╔════════════════════════════════════════════════════════════════════════════╗
-║                      DETAILED COVERAGE ANALYSIS                           ║
-╚════════════════════════════════════════════════════════════════════════════╝
-"""
+        stratum_allocations = self.app.stratum_allocations
         
-        for method, coverage in self.coverage_dict.items():
-            output += f"""
-
-{method}:
-  ────────────────────────────────────────────────────────────────────────
-  Total Strata:      {coverage['total_strata']:>10,}
-  Covered Strata:    {coverage['covered_strata']:>10,}
-  Missed Strata:     {coverage['missed_count']:>10,}
-  Coverage Rate:     {coverage['coverage_pct']:>10.1f}%
-"""
-        
-        self.coverage_text.insert('1.0', output)
+        for i, (name, info) in enumerate(sorted(stratum_allocations.items()), 1):
+            self.stratum_tree.insert('', 'end', text=str(i),
+                values=(str(name)[:40], info['population'], f"{info['risk_score']:.2f}", 
+                        info['allocated'], info['reason'][:50]))
     
     def show_covered_missed_strata(self):
-        """Display covered and missed strata details"""
+        """Show covered/missed strata"""
         if not hasattr(self, 'samples_dict'):
             return
         
-        # Covered strata
         self.covered_text.delete('1.0', tk.END)
-        covered_output = """
-╔════════════════════════════════════════════════════════════════════════════╗
-║                      COVERED STRATA DETAILS                               ║
-╚════════════════════════════════════════════════════════════════════════════╝
-"""
+        covered_output = "\nCOVERED STRATA:\n" + "─" * 80 + "\n"
         
         for method, sample in self.samples_dict.items():
             sample_groups = sample.groupby(self.app.stratum_columns, observed=True)
-            covered_output += f"\n\n{method}:\n"
-            covered_output += "─" * 80 + "\n"
-            
+            covered_output += f"\n{method}:\n"
             for i, (name, group) in enumerate(sorted(sample_groups.groups.items()), 1):
                 covered_output += f"{i:3d}. {str(name)[:60]:60s} | Count: {len(group):6d}\n"
         
         self.covered_text.insert('1.0', covered_output)
         
-        # Missed strata
         self.missed_text.delete('1.0', tk.END)
-        missed_output = """
-╔════════════════════════════════════════════════════════════════════════════╗
-║                      MISSED STRATA DETAILS                                ║
-╚════════════════════════════════════════════════════════════════════════════╝
-"""
+        missed_output = "\nMISSED STRATA:\n" + "─" * 80 + "\n"
         
         data_strata = set(self.data.groupby(self.app.stratum_columns, observed=True).groups.keys())
         
@@ -1084,150 +1025,84 @@ HYBRID (PPS + ANOMALIES):
             sample_strata = set(sample.groupby(self.app.stratum_columns, observed=True).groups.keys())
             missed_strata = data_strata - sample_strata
             
-            missed_output += f"\n\n{method}:\n"
-            missed_output += "─" * 80 + "\n"
-            
+            missed_output += f"\n{method}:\n"
             if missed_strata:
                 for i, stratum in enumerate(sorted(missed_strata), 1):
                     pop = len(self.data[self.data[self.app.stratum_columns].apply(tuple, axis=1) == stratum])
                     missed_output += f"{i:3d}. {str(stratum)[:60]:60s} | Population: {pop:6d}\n"
             else:
-                missed_output += "✓ NO MISSED STRATA - 100% Coverage Achieved!\n"
+                missed_output += "✓ NO MISSED STRATA - 100% Coverage!\n"
         
         self.missed_text.insert('1.0', missed_output)
     
-    def show_stratum_report(self):
-        """Display stratum-level report"""
-        if not hasattr(self, 'samples_dict'):
+    def show_coverage_analysis(self):
+        """Show coverage analysis"""
+        if not hasattr(self, 'coverage_dict'):
             return
         
-        for item in self.stratum_tree.get_children():
-            self.stratum_tree.delete(item)
+        self.coverage_text.delete('1.0', tk.END)
         
-        if 'Risk_PPS' in self.samples_dict:
-            stratum_allocations = self.app.stratum_allocations
-            
-            for i, (name, info) in enumerate(sorted(stratum_allocations.items()), 1):
-                self.stratum_tree.insert('', 'end', text=str(i),
-                    values=(
-                        str(name)[:40],
-                        info['population'],
-                        f"{info['risk_score']:.2f}",
-                        info['allocated'],
-                        info['reason'][:50]
-                    ))
-    
-    def export_all_results(self):
-        """Export all results"""
-        if not hasattr(self, 'samples_dict'):
-            messagebox.showerror("Error", "Generate samples first")
-            return
+        output = "\nCOVERAGE ANALYSIS:\n" + "═" * 80 + "\n"
         
-        try:
-            exported_files = self.app.export_results(self.samples_dict, self.data)
-            
-            self.export_text.delete('1.0', tk.END)
-            output = f"""
-╔════════════════════════════════════════════════════════════════════════════╗
-║                      EXPORT RESULTS - SUCCESS                             ║
-╚════════════════════════════════════════════════════════════════════════════╝
-
-Total Files Exported: {len(exported_files)}
-Directory: {os.path.abspath(self.app.results_dir)}
-
-Exported Files:
+        for method, coverage in self.coverage_dict.items():
+            output += f"""
+{method}:
+  Total Strata: {coverage['total_strata']:>10,} | Covered: {coverage['covered_strata']:>10,}
+  Missed: {coverage['missed_count']:>10,} | Coverage Rate: {coverage['coverage_pct']:>10.1f}%
 """
-            
-            for f in exported_files:
-                output += f"\n  ✓ {f}"
-            
-            output += f"\n\nLocation: {os.path.abspath(self.app.results_dir)}\n"
-            
-            self.export_text.insert('1.0', output)
-            messagebox.showinfo("Success", f"Exported {len(exported_files)} files successfully!")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {str(e)}")
-    
-    def export_single_method(self, method):
-        """Export single method results"""
-        if not hasattr(self, 'samples_dict') or method not in self.samples_dict:
-            messagebox.showerror("Error", f"{method} sample not available")
-            return
         
-        try:
-            exported_files = self.app.export_results({method: self.samples_dict[method]}, self.data)
-            
-            self.export_text.delete('1.0', tk.END)
-            output = f"""
-╔════════════════════════════════════════════════════════════════════════════╗
-║                 EXPORT {method.upper()} - SUCCESS                             ║
-╚════════════════════════════════════════════════════════════════════════════╝
-
-Total Files Exported: {len(exported_files)}
-
-Exported Files:
-"""
-            
-            for f in exported_files:
-                output += f"\n  ✓ {f}"
-            
-            self.export_text.insert('1.0', output)
-            messagebox.showinfo("Success", f"Exported {method} results successfully!")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {str(e)}")
+        self.coverage_text.insert('1.0', output)
     
     def generate_charts(self):
-        """Generate visualization charts"""
+        """Generate charts"""
         if not hasattr(self, 'samples_dict'):
-            messagebox.showerror("Error", "Please generate samples first")
+            messagebox.showerror("Error", "Generate samples first")
             return
         
         try:
             for widget in self.chart_frame.winfo_children():
                 widget.destroy()
             
-            fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
             fig.suptitle('OMRC Sampling Methods Comparison', fontsize=14, fontweight='bold')
             
             methods = list(self.samples_dict.keys())
             sample_sizes = [len(self.samples_dict[m]) for m in methods]
             coverages = [self.coverage_dict[m]['coverage_pct'] for m in methods]
             
-            # Chart 1: Sample Sizes
-            axes[0, 0].bar(methods, sample_sizes, color=['blue', 'green', 'orange'][:len(methods)])
-            axes[0, 0].set_title('Sample Sizes')
+            colors = ['#3498db', '#2ecc71', '#f39c12'][:len(methods)]
+            
+            # Chart 1
+            axes[0, 0].bar(methods, sample_sizes, color=colors)
+            axes[0, 0].set_title('Sample Sizes', fontweight='bold')
             axes[0, 0].set_ylabel('Count')
             for i, v in enumerate(sample_sizes):
-                axes[0, 0].text(i, v + 50, str(v), ha='center')
+                axes[0, 0].text(i, v + 50, str(v), ha='center', fontweight='bold')
             
-            # Chart 2: Coverage Percentages
-            axes[0, 1].bar(methods, coverages, color=['blue', 'green', 'orange'][:len(methods)])
-            axes[0, 1].set_title('Strata Coverage')
+            # Chart 2
+            axes[0, 1].bar(methods, coverages, color=colors)
+            axes[0, 1].set_title('Strata Coverage %', fontweight='bold')
             axes[0, 1].set_ylabel('Coverage %')
             axes[0, 1].set_ylim(0, 100)
             for i, v in enumerate(coverages):
-                axes[0, 1].text(i, v + 2, f'{v:.1f}%', ha='center')
+                axes[0, 1].text(i, v + 2, f'{v:.1f}%', ha='center', fontweight='bold')
             
-            # Chart 3: Risk Distribution
+            # Chart 3
             if 'Risk_PPS' in self.samples_dict and 'risk_score' in self.data.columns:
-                risk_scores = self.data['risk_score'].values
-                axes[1, 0].hist(risk_scores, bins=50, color='green', edgecolor='black')
-                axes[1, 0].set_title('Risk Score Distribution')
+                axes[1, 0].hist(self.data['risk_score'], bins=50, color='#2ecc71', edgecolor='black', alpha=0.7)
+                axes[1, 0].set_title('Risk Score Distribution', fontweight='bold')
                 axes[1, 0].set_xlabel('Risk Score')
                 axes[1, 0].set_ylabel('Frequency')
             
-            # Chart 4: Strata Covered vs Missed
-            covered_counts = [self.coverage_dict[m]['covered_strata'] for m in methods]
-            missed_counts = [self.coverage_dict[m]['missed_count'] for m in methods]
-            
+            # Chart 4
+            covered = [self.coverage_dict[m]['covered_strata'] for m in methods]
+            missed = [self.coverage_dict[m]['missed_count'] for m in methods]
             x = np.arange(len(methods))
             width = 0.35
             
-            axes[1, 1].bar(x - width/2, covered_counts, width, label='Covered', color='green', alpha=0.7)
-            axes[1, 1].bar(x + width/2, missed_counts, width, label='Missed', color='red', alpha=0.7)
-            axes[1, 1].set_title('Strata Coverage Comparison')
+            axes[1, 1].bar(x - width/2, covered, width, label='Covered', color='#2ecc71', alpha=0.8)
+            axes[1, 1].bar(x + width/2, missed, width, label='Missed', color='#e74c3c', alpha=0.8)
+            axes[1, 1].set_title('Strata Coverage', fontweight='bold')
             axes[1, 1].set_ylabel('Count')
             axes[1, 1].set_xticks(x)
             axes[1, 1].set_xticklabels(methods)
@@ -1241,6 +1116,56 @@ Exported Files:
             
         except Exception as e:
             messagebox.showerror("Error", f"Chart generation failed: {str(e)}")
+    
+    def export_all_results(self):
+        """Export all results"""
+        if not hasattr(self, 'samples_dict'):
+            messagebox.showerror("Error", "Generate samples first")
+            return
+        
+        try:
+            exported_files = self.app.export_results(self.samples_dict, self.data)
+            
+            self.export_text.delete('1.0', tk.END)
+            output = f"""
+╔════════════════════════════════════════════════════════════════════════════╗
+║                      EXPORT RESULTS - SUCCESS ✅                          ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Total Files: {len(exported_files)}
+Location: {os.path.abspath(self.app.results_dir)}
+
+Exported Files:
+"""
+            
+            for f in exported_files:
+                output += f"\n  ✓ {f}"
+            
+            self.export_text.insert('1.0', output)
+            messagebox.showinfo("Success", f"Exported {len(exported_files)} files!")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed: {str(e)}")
+    
+    def export_single_method(self, method):
+        """Export single method"""
+        if not hasattr(self, 'samples_dict') or method not in self.samples_dict:
+            messagebox.showerror("Error", f"{method} sample not available")
+            return
+        
+        try:
+            exported_files = self.app.export_results({method: self.samples_dict[method]}, self.data)
+            
+            self.export_text.delete('1.0', tk.END)
+            output = f"✅ Exported {method} results ({len(exported_files)} files)\n\nFiles:\n"
+            for f in exported_files:
+                output += f"  ✓ {f}\n"
+            
+            self.export_text.insert('1.0', output)
+            messagebox.showinfo("Success", f"Exported {method} successfully!")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed: {str(e)}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
