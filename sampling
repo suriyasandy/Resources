@@ -1,5 +1,5 @@
 """
-OMRC Risk-Based Audit Sampling Tool v6.5 - Complete End-to-End Implementation
+OMRC Risk-Based Audit Sampling Tool v6.5 - COMPLETE FIXED IMPLEMENTATION
 ================================================================================
 Globally Aligned with ISA 530, PCAOB AS 2315, IIA Standards, COSO Framework
 
@@ -8,32 +8,19 @@ Date: December 2025
 Purpose: Generate statistically valid, risk-based samples for OMRC exceptions
          across multiple banking products (GBM, Equities, IRD)
 
-Features:
-  ✅ Dynamic stratification (Product, Size, Severity, Custom Columns)
-  ✅ Risk scoring via ln(N_h) * Frequency * 100 formula
-  ✅ Two-phase allocation (Phase 1 coverage + Phase 2 risk-weighted PPS)
-  ✅ Cochran formula for sample size (95% confidence, attribute testing)
-  ✅ Three sampling methods: Traditional Random, Risk-PPS, Hybrid
-  ✅ 100% stratum coverage guarantee
-  ✅ Audit-ready exports (CSV/Excel)
-  ✅ Complete documentation & allocation reasons
-
 INSTALLATION:
   pip install pandas numpy scipy matplotlib openpyxl
 
 USAGE:
-  python OMRC_SamplingTool_v650.py
+  python OMRC_SamplingTool_v650_FIXED.py
 """
 
 import pandas as pd
 import numpy as np
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from datetime import datetime
-import csv
 from scipy import stats
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -45,22 +32,13 @@ class OMRCSamplingTool:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("OMRC Risk-Based Audit Sampling Tool v6.5")
+        self.root.title("OMRC Risk-Based Audit Sampling Tool v6.5 - FIXED")
         self.root.geometry("1400x900")
         
         # Data storage
         self.data = None
         self.strata_summary = None
-        self.risk_scores = None
         self.samples = {}
-        self.allocation = None
-        
-        # Sampling parameters
-        self.cochran_params = {
-            'confidence': 0.95,
-            'tolerable_rate': 0.03,
-            'expected_rate': 0.005
-        }
         self.sample_size = None
         
         # Mandatory columns
@@ -73,7 +51,6 @@ class OMRCSamplingTool:
     def create_ui(self):
         """Create tabbed interface with all analysis tabs"""
         
-        # Create notebook (tabbed interface)
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill='both', expand=True, padx=5, pady=5)
         
@@ -120,7 +97,6 @@ class OMRCSamplingTool:
     def create_tab1(self):
         """Tab 1: Data Loading & Stratification Configuration"""
         
-        # Data loading section
         frame_load = ttk.LabelFrame(self.tab1, text="Data Loading", padding=10)
         frame_load.pack(fill='x', padx=5, pady=5)
         
@@ -176,11 +152,9 @@ class OMRCSamplingTool:
         frame_preview = ttk.LabelFrame(self.tab1, text="Data Preview (First 50 rows)", padding=5)
         frame_preview.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # Treeview for preview
         self.tree_preview = ttk.Treeview(frame_preview, height=20)
         self.tree_preview.pack(fill='both', expand=True)
         
-        # Scrollbar
         scrollbar = ttk.Scrollbar(frame_preview, orient='horizontal', command=self.tree_preview.xview)
         scrollbar.pack(fill='x')
         self.tree_preview.configure(xscrollcommand=scrollbar.set)
@@ -198,7 +172,6 @@ class OMRCSamplingTool:
         self.label_risk_status = ttk.Label(frame_btn, text="Awaiting risk calculation", foreground="orange")
         self.label_risk_status.pack(side='left', padx=20)
         
-        # Tabbed risk analysis
         self.notebook_risk = ttk.Notebook(self.tab2)
         self.notebook_risk.pack(fill='both', expand=True, padx=5, pady=5)
         
@@ -224,7 +197,6 @@ class OMRCSamplingTool:
     def create_tab3(self):
         """Tab 3: Sampling Methods & Sample Generation"""
         
-        # Cochran parameters
         frame_cochran = ttk.LabelFrame(self.tab3, text="Cochran Formula Parameters (Attribute Testing)", padding=10)
         frame_cochran.pack(fill='x', padx=5, pady=5)
         
@@ -243,7 +215,6 @@ class OMRCSamplingTool:
         self.entry_exp.insert(0, '0.005')
         self.entry_exp.grid(row=2, column=1, padx=5, pady=5)
         
-        # Sampling methods
         frame_methods = ttk.LabelFrame(self.tab3, text="Sampling Methods to Generate", padding=10)
         frame_methods.pack(fill='x', padx=5, pady=5)
         
@@ -255,7 +226,6 @@ class OMRCSamplingTool:
         ttk.Checkbutton(frame_methods, text="Risk-PPS (Recommended)", variable=self.var_risk).pack(anchor='w')
         ttk.Checkbutton(frame_methods, text="Hybrid (70% Risk + 30% Random)", variable=self.var_hybrid).pack(anchor='w')
         
-        # Generate button
         frame_gen = ttk.Frame(self.tab3)
         frame_gen.pack(fill='x', padx=5, pady=10)
         
@@ -266,7 +236,6 @@ class OMRCSamplingTool:
         self.label_gen_status = ttk.Label(frame_gen, text="Awaiting sample generation", foreground="orange")
         self.label_gen_status.pack(side='left', padx=20)
         
-        # Results output
         frame_results = ttk.LabelFrame(self.tab3, text="Sample Generation Results", padding=10)
         frame_results.pack(fill='both', expand=True, padx=5, pady=5)
         
@@ -279,8 +248,7 @@ class OMRCSamplingTool:
         frame_cov = ttk.LabelFrame(self.tab4, text="Coverage Analysis Summary", padding=10)
         frame_cov.pack(fill='both', expand=True, padx=5, pady=5)
         
-        self.tree_coverage = ttk.Treeview(frame_cov, columns=('Metric', 'Value'),
-                                         height=15)
+        self.tree_coverage = ttk.Treeview(frame_cov, columns=('Metric', 'Value'), height=15)
         self.tree_coverage['show'] = 'headings'
         for col in ('Metric', 'Value'):
             self.tree_coverage.column(col, width=200)
@@ -294,7 +262,7 @@ class OMRCSamplingTool:
         frame_alloc.pack(fill='both', expand=True, padx=5, pady=5)
         
         self.tree_allocation = ttk.Treeview(frame_alloc, 
-                                           columns=('Stratum', 'N_h', 'R_h', 'n_h', 'Sampling%', 'Allocation_Reason'),
+                                           columns=('Stratum', 'N_h', 'R_h', 'n_h', 'Sampling_Pct', 'Allocation_Reason'),
                                            height=25)
         self.tree_allocation['show'] = 'headings'
         cols_config = {
@@ -302,7 +270,7 @@ class OMRCSamplingTool:
             'N_h': 70,
             'R_h': 70,
             'n_h': 70,
-            'Sampling%': 80,
+            'Sampling_Pct': 80,
             'Allocation_Reason': 200
         }
         for col, width in cols_config.items():
@@ -311,7 +279,6 @@ class OMRCSamplingTool:
         
         self.tree_allocation.pack(fill='both', expand=True)
         
-        # Scrollbar
         scrollbar = ttk.Scrollbar(frame_alloc, orient='horizontal', command=self.tree_allocation.xview)
         scrollbar.pack(fill='x')
         self.tree_allocation.configure(xscrollcommand=scrollbar.set)
@@ -323,10 +290,10 @@ class OMRCSamplingTool:
         frame_covered.pack(fill='both', expand=True, padx=5, pady=5)
         
         self.tree_covered = ttk.Treeview(frame_covered,
-                                        columns=('Stratum', 'N_h', 'n_h', 'Sampling%', 'Status'),
+                                        columns=('Stratum', 'N_h', 'n_h', 'Sampling_Pct', 'Status'),
                                         height=25)
         self.tree_covered['show'] = 'headings'
-        for col in ('Stratum', 'N_h', 'n_h', 'Sampling%', 'Status'):
+        for col in ('Stratum', 'N_h', 'n_h', 'Sampling_Pct', 'Status'):
             self.tree_covered.column(col, width=120)
             self.tree_covered.heading(col, text=col)
         self.tree_covered.pack(fill='both', expand=True)
@@ -335,7 +302,6 @@ class OMRCSamplingTool:
         """Tab 7: Comparison Charts (placeholder)"""
         frame_charts = ttk.Frame(self.tab7)
         frame_charts.pack(fill='both', expand=True, padx=5, pady=5)
-        
         label = ttk.Label(frame_charts, text="Charts will be generated here", foreground="gray")
         label.pack(pady=50)
     
@@ -381,66 +347,63 @@ class OMRCSamplingTool:
                 else:
                     self.data = pd.read_excel(file_path)
                 
-                # Update column dropdowns
                 cols = list(self.data.columns)
                 self.combo_col1['values'] = cols
                 self.combo_col2['values'] = cols
                 
                 self.label_data_status.config(
-                    text=f"✓ Loaded: {len(self.data)} rows, {len(self.data.columns)} cols",
+                    text=f"SUCCESS: {len(self.data)} rows, {len(self.data.columns)} cols",
                     foreground="green"
                 )
                 
-                # Update preview
                 self.update_preview()
                 
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to load file: {e}")
+                messagebox.showerror("Error", f"Failed to load file: {str(e)}")
     
     def generate_sample_data(self):
         """Generate realistic OMRC sample dataset"""
-        np.random.seed(42)
-        
-        n_records = 10000
-        
-        products = ['IRD_Complex', 'IRD_Vanilla', 'Bonds', 'Equities', 'FX_Derivatives']
-        size_bands = ['Small', 'Medium', 'Large']
-        severity = ['Band_A', 'Band_B', 'Band_C']
-        entities = ['Trading_Desk_1', 'Trading_Desk_2', 'Desk_APAC', 'Desk_EU']
-        
-        self.data = pd.DataFrame({
-            'TransactionID': range(1, n_records + 1),
-            'Product': np.random.choice(products, n_records, p=[0.25, 0.15, 0.25, 0.20, 0.15]),
-            'SizeBand': np.random.choice(size_bands, n_records, p=[0.60, 0.30, 0.10]),
-            'Severity': np.random.choice(severity, n_records, p=[0.70, 0.20, 0.10]),
-            'Entity': np.random.choice(entities, n_records),
-            'NotionalValue': np.random.lognormal(10, 2, n_records),
-            'DevPercentage': np.random.beta(2, 5, n_records) * 5,
-            'AlertCount': np.random.poisson(1, n_records),
-        })
-        
-        # Update UI
-        cols = list(self.data.columns)
-        self.combo_col1['values'] = cols
-        self.combo_col2['values'] = cols
-        
-        self.label_data_status.config(
-            text=f"✓ Generated: {len(self.data)} rows, {len(self.data.columns)} cols",
-            foreground="green"
-        )
-        
-        self.update_preview()
+        try:
+            np.random.seed(42)
+            n_records = 10000
+            
+            products = ['IRD_Complex', 'IRD_Vanilla', 'Bonds', 'Equities', 'FX_Derivatives']
+            size_bands = ['Small', 'Medium', 'Large']
+            severity = ['Band_A', 'Band_B', 'Band_C']
+            entities = ['Trading_Desk_1', 'Trading_Desk_2', 'Desk_APAC', 'Desk_EU']
+            
+            self.data = pd.DataFrame({
+                'TransactionID': range(1, n_records + 1),
+                'Product': np.random.choice(products, n_records, p=[0.25, 0.15, 0.25, 0.20, 0.15]),
+                'SizeBand': np.random.choice(size_bands, n_records, p=[0.60, 0.30, 0.10]),
+                'Severity': np.random.choice(severity, n_records, p=[0.70, 0.20, 0.10]),
+                'Entity': np.random.choice(entities, n_records),
+                'NotionalValue': np.random.lognormal(10, 2, n_records),
+                'DevPercentage': np.random.beta(2, 5, n_records) * 5,
+                'AlertCount': np.random.poisson(1, n_records),
+            })
+            
+            cols = list(self.data.columns)
+            self.combo_col1['values'] = cols
+            self.combo_col2['values'] = cols
+            
+            self.label_data_status.config(
+                text=f"SUCCESS: Generated {len(self.data)} rows, {len(self.data.columns)} cols",
+                foreground="green"
+            )
+            
+            self.update_preview()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate data: {str(e)}")
     
     def update_preview(self):
         """Update data preview in Tab 1"""
         if self.data is None:
             return
         
-        # Clear existing items
         for item in self.tree_preview.get_children():
             self.tree_preview.delete(item)
         
-        # Set columns
         cols = list(self.data.columns)
         self.tree_preview['columns'] = cols
         self.tree_preview['show'] = 'headings'
@@ -449,9 +412,8 @@ class OMRCSamplingTool:
             self.tree_preview.column(col, width=100)
             self.tree_preview.heading(col, text=col)
         
-        # Insert first 50 rows
         for idx, row in self.data.head(50).iterrows():
-            values = [row[col] for col in cols]
+            values = [str(row[col])[:50] for col in cols]
             self.tree_preview.insert('', 'end', values=values)
     
     # ==================== STRATIFICATION ====================
@@ -467,12 +429,14 @@ class OMRCSamplingTool:
         
         available = [c for c in self.data.columns if c not in [col1, col2]]
         
-        from tkinter import simpledialog
         selection = simpledialog.askstring("Additional Columns", 
                                            f"Enter column names (comma-separated):\n{', '.join(available)}")
         if selection:
-            self.additional_cols = [s.strip() for s in selection.split(',')]
-            self.label_add_cols.config(text=f"Selected: {', '.join(self.additional_cols)}", foreground="green")
+            self.additional_cols = [s.strip() for s in selection.split(',') if s.strip()]
+            self.label_add_cols.config(
+                text=f"Selected: {', '.join(self.additional_cols)}", 
+                foreground="green"
+            )
     
     def apply_stratification(self):
         """Create stratification and generate stratum keys"""
@@ -480,21 +444,21 @@ class OMRCSamplingTool:
             messagebox.showerror("Error", "Load data and select mandatory columns first")
             return
         
-        col1 = self.combo_col1.get()
-        col2 = self.combo_col2.get()
-        
-        # Create stratum key
-        strata_cols = [col1, col2] + self.additional_cols
-        self.data['StratumKey'] = self.data[strata_cols].astype(str).agg('|'.join, axis=1)
-        
-        # Summarize strata
-        self.strata_summary = self.data.groupby('StratumKey').size().reset_index(name='N_h')
-        self.strata_summary['StratumIdx'] = range(len(self.strata_summary))
-        
-        self.label_strata_status.config(
-            text=f"✓ Stratification applied: {len(self.strata_summary)} strata created",
-            foreground="green"
-        )
+        try:
+            col1 = self.combo_col1.get()
+            col2 = self.combo_col2.get()
+            
+            strata_cols = [col1, col2] + self.additional_cols
+            self.data['StratumKey'] = self.data[strata_cols].astype(str).agg('|'.join, axis=1)
+            
+            self.strata_summary = self.data.groupby('StratumKey').size().reset_index(name='N_h')
+            
+            self.label_strata_status.config(
+                text=f"SUCCESS: {len(self.strata_summary)} strata created",
+                foreground="green"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to apply stratification: {str(e)}")
     
     # ==================== RISK CALCULATION ====================
     
@@ -504,56 +468,56 @@ class OMRCSamplingTool:
             messagebox.showerror("Error", "Apply stratification first")
             return
         
-        # Calculate total records
-        total_N = self.strata_summary['N_h'].sum()
-        
-        # Risk score formula
-        self.strata_summary['Frequency'] = self.strata_summary['N_h'] / total_N
-        self.strata_summary['R_h'] = np.log(self.strata_summary['N_h'] + 1) * self.strata_summary['Frequency'] * 100
-        
-        # Phase 1: Identify small strata (N_h < 10)
-        self.strata_summary['Phase1'] = self.strata_summary['N_h'] < 10
-        
-        # Phase 2: Risk rank for other strata
-        self.strata_summary['RiskRank'] = self.strata_summary['R_h'].rank(ascending=False)
-        
-        # Populate Tab 2 Phase 1
-        self.tree_phase1.delete(*self.tree_phase1.get_children())
-        
-        for idx, row in self.strata_summary.iterrows():
-            stratum = row['StratumKey']
-            narrative = f"{'Small stratum (N<10)' if row['Phase1'] else f'Risk score: {row['R_h']:.2f}'}"
-            self.tree_phase1.insert('', 'end', values=(
-                stratum[:50],  # Truncate for display
-                int(row['N_h']),
-                f"{row['Frequency']*100:.1f}%",
-                f"{row['R_h']:.2f}",
-                narrative
-            ))
-        
-        # Phase 2: Cumulative risk output
-        sorted_strata = self.strata_summary.sort_values('R_h', ascending=False)
-        cumsum_risk = sorted_strata['R_h'].cumsum()
-        cumsum_pct = cumsum_risk / sorted_strata['R_h'].sum() * 100
-        
-        phase2_text = "CUMULATIVE RISK DISTRIBUTION (Top 20% strata):\n"
-        phase2_text += "=" * 80 + "\n"
-        phase2_text += f"{'Rank':<5} {'Stratum':<40} {'Risk Score':<12} {'Cumulative %':<12}\n"
-        phase2_text += "=" * 80 + "\n"
-        
-        for i, (idx, row) in enumerate(sorted_strata.head(20).iterrows()):
-            phase2_text += f"{i+1:<5} {row['StratumKey'][:40]:<40} {row['R_h']:<12.2f} {cumsum_pct.iloc[i]:<12.1f}\n"
-        
-        phase2_text += "\n" + "INTERPRETATION:\n"
-        phase2_text += f"Top 20% of strata account for {cumsum_pct.iloc[19] if len(cumsum_pct) >= 20 else cumsum_pct.iloc[-1]:.1f}% of total risk\n"
-        phase2_text += "Risk-weighted allocation will prioritize these high-risk strata for audit sampling."
-        
-        self.text_phase2.config(state='normal')
-        self.text_phase2.delete('1.0', 'end')
-        self.text_phase2.insert('1.0', phase2_text)
-        self.text_phase2.config(state='disabled')
-        
-        self.label_risk_status.config(text="✓ Risk scores calculated", foreground="green")
+        try:
+            total_N = self.strata_summary['N_h'].sum()
+            
+            self.strata_summary['Frequency'] = self.strata_summary['N_h'] / total_N
+            self.strata_summary['R_h'] = (np.log(self.strata_summary['N_h'] + 1) * 
+                                          self.strata_summary['Frequency'] * 100)
+            
+            self.strata_summary['Phase1'] = self.strata_summary['N_h'] < 10
+            
+            # Populate Tab 2 Phase 1
+            self.tree_phase1.delete(*self.tree_phase1.get_children())
+            
+            for idx, row in self.strata_summary.iterrows():
+                stratum = row['StratumKey']
+                narrative = ('Small stratum (N<10)' if row['Phase1'] 
+                           else f"Risk score: {row['R_h']:.2f}")
+                self.tree_phase1.insert('', 'end', values=(
+                    stratum[:50],
+                    int(row['N_h']),
+                    f"{row['Frequency']*100:.1f}%",
+                    f"{row['R_h']:.2f}",
+                    narrative
+                ))
+            
+            # Phase 2: Cumulative risk output
+            sorted_strata = self.strata_summary.sort_values('R_h', ascending=False)
+            cumsum_risk = sorted_strata['R_h'].cumsum()
+            cumsum_pct = cumsum_risk / sorted_strata['R_h'].sum() * 100
+            
+            phase2_text = "CUMULATIVE RISK DISTRIBUTION (Top 20 strata):\n"
+            phase2_text += "=" * 80 + "\n"
+            phase2_text += f"{'Rank':<5} {'Stratum':<40} {'Risk Score':<12} {'Cumulative %':<12}\n"
+            phase2_text += "=" * 80 + "\n"
+            
+            for i, (idx, row) in enumerate(sorted_strata.head(20).iterrows()):
+                phase2_text += f"{i+1:<5} {row['StratumKey'][:40]:<40} {row['R_h']:<12.2f} {cumsum_pct.iloc[i]:<12.1f}\n"
+            
+            phase2_text += "\n" + "INTERPRETATION:\n"
+            top_pct = cumsum_pct.iloc[19] if len(cumsum_pct) >= 20 else cumsum_pct.iloc[-1]
+            phase2_text += f"Top 20% of strata account for {top_pct:.1f}% of total risk\n"
+            phase2_text += "Risk-weighted allocation will prioritize these high-risk strata."
+            
+            self.text_phase2.config(state='normal')
+            self.text_phase2.delete('1.0', 'end')
+            self.text_phase2.insert('1.0', phase2_text)
+            self.text_phase2.config(state='disabled')
+            
+            self.label_risk_status.config(text="SUCCESS: Risk scores calculated", foreground="green")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to calculate risk: {str(e)}")
     
     # ==================== SAMPLE GENERATION ====================
     
@@ -564,58 +528,64 @@ class OMRCSamplingTool:
             return
         
         try:
-            # Get Cochran parameters
             conf = float(self.entry_conf.get())
             tol = float(self.entry_tol.get())
             exp = float(self.entry_exp.get())
             
-            # Calculate Z-score
             z_score = stats.norm.ppf((1 + conf) / 2)
-            
-            # Cochran formula
             n = (z_score ** 2 * exp * (1 - exp)) / (tol ** 2)
             
-            # Finite population correction
             N_total = self.data.shape[0]
             n_adjusted = n / (1 + n / N_total)
-            
             self.sample_size = int(np.ceil(n_adjusted))
             
-            # Two-phase allocation
-            phase1_strata = self.strata_summary[self.strata_summary['Phase1']]
-            n_phase1 = min(len(phase1_strata), int(self.sample_size * 0.15))
-            n_phase2 = self.sample_size - n_phase1
+            # ====== TWO-PHASE ALLOCATION (FIXED) ======
             
+            # Reset allocation
             self.strata_summary['n_h'] = 0
             self.strata_summary['AllocationReason'] = ''
             
-            # Phase 1: Allocate 1 per small stratum
-            for idx, row in phase1_strata.iterrows():
-                self.strata_summary.at[idx, 'n_h'] = 1
-                self.strata_summary.at[idx, 'AllocationReason'] = 'Reserved: High-risk stratum with N < 10'
+            # Phase 1: Identify and allocate small strata
+            phase1_mask = self.strata_summary['Phase1']
+            phase1_count = phase1_mask.sum()
+            n_phase1 = min(phase1_count, int(self.sample_size * 0.15))
+            n_phase2 = self.sample_size - n_phase1
             
-            # Phase 2: Risk-weighted PPS allocation
-            large_strata = self.strata_summary[~self.strata_summary['Phase1']].copy()
-            if len(large_strata) > 0:
-                total_weight = (large_strata['N_h'] * large_strata['R_h']).sum()
-                large_strata['Weight'] = (large_strata['N_h'] * large_strata['R_h']) / total_weight
+            # Allocate 1 sample to each Phase 1 stratum
+            phase1_indices = self.strata_summary[phase1_mask].index
+            for idx in phase1_indices:
+                self.strata_summary.at[idx, 'n_h'] = 1
+                self.strata_summary.at[idx, 'AllocationReason'] = 'Reserved: High-risk stratum (N<10)'
+            
+            # Phase 2: Risk-weighted allocation for large strata (FIXED)
+            phase2_mask = ~phase1_mask
+            phase2_strata = self.strata_summary[phase2_mask].copy()
+            
+            if len(phase2_strata) > 0:
+                # Calculate weights
+                total_weight = (phase2_strata['N_h'] * phase2_strata['R_h']).sum()
+                phase2_strata['Weight'] = (phase2_strata['N_h'] * phase2_strata['R_h']) / total_weight
                 
-                allocation = np.round(large_strata['Weight'] * n_phase2).astype(int)
-                allocation = np.maximum(allocation, 1)
+                # Initial allocation
+                allocation_values = np.round(phase2_strata['Weight'].values * n_phase2).astype(int)
+                allocation_values = np.maximum(allocation_values, 1)
                 
-                if allocation.sum() > n_phase2:
-                    excess = allocation.sum() - n_phase2
-                    sorted_indices = allocation.argsort()
+                # Rebalance if over-allocated
+                excess = max(0, allocation_values.sum() - n_phase2)
+                if excess > 0:
                     for i in range(excess):
-                        allocation.iloc[sorted_indices[i % len(allocation)]] -= 1
-                        allocation = np.maximum(allocation, 1)
+                        idx_to_reduce = np.argmax(allocation_values)
+                        if allocation_values[idx_to_reduce] > 1:
+                            allocation_values[idx_to_reduce] -= 1
                 
-                for idx, row in large_strata.iterrows():
-                    data_idx = self.strata_summary.index.get_loc(idx)
-                    self.strata_summary.at[idx, 'n_h'] = allocation.iloc[data_idx]
-                    self.strata_summary.at[idx, 'AllocationReason'] = (
-                        f'Risk-weighted: N_h={int(row['N_h'])}, R_h={row['R_h']:.2f} → {int(allocation.iloc[data_idx])} samples'
-                    )
+                # Assign allocations back to strata_summary
+                for i, idx in enumerate(phase2_strata.index):
+                    n_h_value = int(allocation_values[i])
+                    self.strata_summary.at[idx, 'n_h'] = n_h_value
+                    N_h_value = int(phase2_strata.loc[idx, 'N_h'])
+                    R_h_value = float(phase2_strata.loc[idx, 'R_h'])
+                    reason = f"Risk-weighted: N_h={N_h_value}, R_h={R_h_value:.2f} samples={n_h_value}"
+                    self.strata_summary.at[idx, 'AllocationReason'] = reason
             
             # Generate samples
             self.samples = {}
@@ -630,43 +600,46 @@ class OMRCSamplingTool:
             self.update_allocation_table()
             self.update_coverage_summary()
             
-            # Results text
+            # Results output
             results_text = f"""
 COCHRAN FORMULA SAMPLE SIZE CALCULATION
-{'=' * 80}
+{'='*80}
 Confidence Level: {conf*100:.0f}% (Z-score: {z_score:.4f})
 Tolerable Deviation Rate: {tol*100:.2f}%
 Expected Deviation Rate: {exp*100:.2f}%
 Total Population (N): {N_total:,}
 
-Cochran: n = Z² × p × (1-p) / E² = {n:.2f}
+Cochran: n = Z^2 x p x (1-p) / E^2 = {n:.2f}
 Adjusted (FPC): {n_adjusted:.2f}
 RECOMMENDED SAMPLE SIZE: {self.sample_size} transactions
 
 TWO-PHASE ALLOCATION
-{'=' * 80}
-Phase 1 (Coverage): {n_phase1} samples for {len(phase1_strata)} small strata (N < 10)
-Phase 2 (Risk-Weighted PPS): {n_phase2} samples for {len(large_strata)} large strata
-Total: {self.sample_size} samples, 100% stratum coverage
+{'='*80}
+Phase 1 (Coverage): {n_phase1} samples for {phase1_count} small strata (N<10)
+Phase 2 (Risk-Weighted PPS): {n_phase2} samples for {len(phase2_strata)} large strata
+Total: {self.sample_size} samples with 100% stratum coverage
 
 METHODS GENERATED
-{'=' * 80}
+{'='*80}
 ✓ Traditional Random: {len(self.samples.get('Traditional', []))} samples
 ✓ Risk-PPS (Recommended): {len(self.samples.get('Risk-PPS', []))} samples
 ✓ Hybrid: {len(self.samples.get('Hybrid', []))} samples
 
 Proceed to Tab 4 for coverage and Tab 5 for allocation details.
-"""
+            """
             
             self.text_results.config(state='normal')
             self.text_results.delete('1.0', 'end')
             self.text_results.insert('1.0', results_text)
             self.text_results.config(state='disabled')
             
-            self.label_gen_status.config(text=f"✓ Samples generated ({self.sample_size} total)", foreground="green")
+            self.label_gen_status.config(
+                text=f"SUCCESS: Samples generated ({self.sample_size} total)", 
+                foreground="green"
+            )
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate samples: {e}")
+            messagebox.showerror("Error", f"Failed to generate samples: {str(e)}")
     
     def generate_traditional_sample(self):
         """Generate traditional random sample"""
@@ -675,13 +648,16 @@ Proceed to Tab 4 for coverage and Tab 5 for allocation details.
             stratum_key = row['StratumKey']
             n_h = int(row['n_h'])
             stratum_data = self.data[self.data['StratumKey'] == stratum_key]
+            
             if len(stratum_data) > n_h:
                 sample_indices = np.random.choice(stratum_data.index, n_h, replace=False)
                 sample = self.data.loc[sample_indices].copy()
             else:
                 sample = stratum_data.copy()
+            
             sample['SamplingMethod'] = 'Traditional'
             samples.append(sample)
+        
         return pd.concat(samples, ignore_index=True) if samples else pd.DataFrame()
     
     def generate_risk_pps_sample(self):
@@ -691,32 +667,41 @@ Proceed to Tab 4 for coverage and Tab 5 for allocation details.
             stratum_key = row['StratumKey']
             n_h = int(row['n_h'])
             stratum_data = self.data[self.data['StratumKey'] == stratum_key]
+            
             if len(stratum_data) > n_h:
                 sample_indices = np.random.choice(stratum_data.index, n_h, replace=False)
                 sample = self.data.loc[sample_indices].copy()
             else:
                 sample = stratum_data.copy()
+            
             sample['SamplingMethod'] = 'Risk-PPS'
             samples.append(sample)
+        
         return pd.concat(samples, ignore_index=True) if samples else pd.DataFrame()
     
     def generate_hybrid_sample(self):
-        """Generate Hybrid sample"""
+        """Generate Hybrid sample (70% Risk-PPS + 30% Random)"""
         risk_pps = self.generate_risk_pps_sample()
-        n_risk = int(len(risk_pps) * 0.7)
-        sample_risk = risk_pps.sample(n=min(n_risk, len(risk_pps)), random_state=42).copy()
         trad = self.generate_traditional_sample()
-        n_trad = int(len(trad) * 0.3)
+        
+        n_risk = max(1, int(len(risk_pps) * 0.7))
+        n_trad = max(1, int(len(trad) * 0.3))
+        
+        sample_risk = risk_pps.sample(n=min(n_risk, len(risk_pps)), random_state=42).copy()
         sample_trad = trad.sample(n=min(n_trad, len(trad)), random_state=42).copy()
+        
         hybrid = pd.concat([sample_risk, sample_trad], ignore_index=True)
         hybrid['SamplingMethod'] = 'Hybrid'
+        
         return hybrid
     
     def update_allocation_table(self):
         """Update Tab 5"""
         self.tree_allocation.delete(*self.tree_allocation.get_children())
+        
         for idx, row in self.strata_summary.sort_values('R_h', ascending=False).iterrows():
             sampling_pct = (row['n_h'] / row['N_h'] * 100) if row['N_h'] > 0 else 0
+            
             self.tree_allocation.insert('', 'end', values=(
                 row['StratumKey'][:100],
                 int(row['N_h']),
@@ -729,13 +714,21 @@ Proceed to Tab 4 for coverage and Tab 5 for allocation details.
     def update_coverage_summary(self):
         """Update Tab 4"""
         self.tree_coverage.delete(*self.tree_coverage.get_children())
+        
+        total_strata = len(self.strata_summary)
+        strata_covered = (self.strata_summary['n_h'] > 0).sum()
+        coverage_rate = (strata_covered / total_strata * 100) if total_strata > 0 else 0
+        total_sampled = int(self.strata_summary['n_h'].sum())
+        sampling_rate = (total_sampled / self.data.shape[0] * 100) if self.data is not None else 0
+        
         metrics = {
-            'Total Strata': len(self.strata_summary),
-            'Strata Covered': (self.strata_summary['n_h'] > 0).sum(),
-            'Coverage Rate (%)': f"{(self.strata_summary['n_h'] > 0).sum() / len(self.strata_summary) * 100:.1f}%",
-            'Total Sampled': int(self.strata_summary['n_h'].sum()),
-            'Overall Sampling %': f"{self.strata_summary['n_h'].sum() / self.data.shape[0] * 100:.2f}%"
+            'Total Strata': str(total_strata),
+            'Strata Covered': str(strata_covered),
+            'Coverage Rate %': f"{coverage_rate:.1f}%",
+            'Total Sampled': str(total_sampled),
+            'Overall Sampling %': f"{sampling_rate:.2f}%"
         }
+        
         for metric, value in metrics.items():
             self.tree_coverage.insert('', 'end', values=(metric, value))
     
@@ -753,6 +746,7 @@ Proceed to Tab 4 for coverage and Tab 5 for allocation details.
         
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
             for method, sample_df in self.samples.items():
                 file_path = f"{folder}/OMRC_Sample_{method}_{timestamp}.csv"
                 sample_df.to_csv(file_path, index=False)
@@ -762,8 +756,8 @@ Proceed to Tab 4 for coverage and Tab 5 for allocation details.
             export_alloc.to_csv(alloc_path, index=False)
             
             export_msg = f"""
-✓ EXPORT SUCCESSFUL
-{'=' * 80}
+EXPORT SUCCESSFUL
+{'='*80}
 Timestamp: {timestamp}
 
 Files exported:
@@ -776,14 +770,15 @@ Location: {folder}
 
 NEXT STEPS:
   1. Import Risk-PPS sample into audit testing spreadsheet
-  2. Execute agreed-upon procedures per OMRC_Sampling_Methodology_v1.0.md
+  2. Execute procedures per OMRC_Sampling_Methodology_v1.0.md
   3. Document deviations
-  4. Calculate deviation rate and project to population
-  5. Compare projected rate vs tolerable rate (3%)
-  6. Conclude on control effectiveness
+  4. Calculate deviation rate
+  5. Project to population
+  6. Compare vs tolerable rate (3%)
+  7. Conclude on control effectiveness
 
-Reference: OMRC_Sampling_Methodology_v1.0.md for complete audit guidance
-"""
+Reference: OMRC_Sampling_Methodology_v1.0.md
+            """
             
             self.text_export.config(state='normal')
             self.text_export.delete('1.0', 'end')
@@ -793,7 +788,7 @@ Reference: OMRC_Sampling_Methodology_v1.0.md for complete audit guidance
             messagebox.showinfo("Success", "Export complete!")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {e}")
+            messagebox.showerror("Error", f"Export failed: {str(e)}")
     
     def export_single_method(self, method):
         """Export single method"""
@@ -810,9 +805,9 @@ Reference: OMRC_Sampling_Methodology_v1.0.md for complete audit guidance
         if file_path:
             try:
                 self.samples[method].to_csv(file_path, index=False)
-                messagebox.showinfo("Success", f"Exported {len(self.samples[method])} records")
+                messagebox.showinfo("Success", f"Exported {len(self.samples[method])} records to file")
             except Exception as e:
-                messagebox.showerror("Error", f"Export failed: {e}")
+                messagebox.showerror("Error", f"Export failed: {str(e)}")
 
 # ==================== MAIN ====================
 
