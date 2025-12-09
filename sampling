@@ -5,7 +5,7 @@
 ║                    Ready for Immediate Deployment                              ║
 ╚════════════════════════════════════════════════════════════════════════════════╝
 
-FILE: OMRC_RiskBasedSampling_v321_LogicFixed.py
+FILE: OMRC_RiskBasedSampling_v321_Complete.py
 VERSION: 3.2.1 - Logic fixes only, UI unchanged
 DATE: December 9, 2025
 STATUS: ✓ PRODUCTION READY
@@ -18,6 +18,12 @@ CRITICAL FIXES (Logic Only):
   ✓ Added within-stratum sampling (40/60 for large)
 
 UI CHANGES: NONE - Keeping existing UI structure
+
+INSTALLATION:
+  pip install pandas numpy scikit-learn matplotlib seaborn openpyxl
+
+RUN:
+  python OMRC_RiskBasedSampling_v321_Complete.py
 """
 
 import tkinter as tk
@@ -40,6 +46,8 @@ warnings.filterwarnings('ignore')
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OMRCRiskBasedSampling:
+    """OMRC Risk-Based Sampling Engine with Two-Phase Allocation"""
+    
     def __init__(self):
         self.data = None
         self.stratum_columns = []
@@ -86,7 +94,7 @@ class OMRCRiskBasedSampling:
                 freq = N_h / total_pop
                 risk_h = math.log(max(N_h, 1)) * freq * 100
                 
-                # FIX: Use df.loc[index] for direct assignment
+                # FIX #1: Use df.loc[index] for direct assignment
                 # This guarantees 100% record coverage with no length mismatch
                 data.loc[group.index, 'risk_score'] = risk_h
             
@@ -406,6 +414,8 @@ class OMRCRiskBasedSampling:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OMRCGUIApplication:
+    """GUI Application for OMRC Risk-Based Sampling Tool"""
+    
     def __init__(self, root):
         self.root = root
         self.root.title("OMRC Risk-Based Sampling Tool v3.2.1")
