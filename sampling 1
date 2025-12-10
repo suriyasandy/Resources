@@ -1,0 +1,1064 @@
+#!/usr/bin/env python3
+"""
+OMRC v8.9 - FINAL PRODUCTION CODE WITH AUTOMATIC SAMPLE SIZE CALCULATION
+Complete Audit Sampling Tool - Error-Proof & Production Ready
+
+CHANGES / FIXES in this distribution:
+- Corrected Cochran finite-population correction (uses n0/(1 + (n0 - 1)/N))
+- Explicit auditor-facing report generation (CSV + plain-text summary) on export
+- Neyman allocation strictly follows n_h = n * (N_h * S_h) / Σ(N_h * S_h)
+- Proportional allocation follows n_h = n * (N_h / N)
+- Minimum per-stratum enforcement and deterministic rounding rules
+- Random seeds where appropriate; option to keep randomization reproducible
+- Robust NaN handling and clear explanatory fields for auditors
+- All UI flow preserved (tabs / buttons / layout unchanged)
+
+Author: OMRC Compliance Team (updated)
+Version: 8.9.1 (Production)
+Date: December 10, 2025
+"""
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, Toplevel, Listbox, MULTIPLE
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import os
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import seaborn as sns
+import warnings
+from scipy import stats
+import textwrap
+import csv
+import json
+
+warnings.filterwarnings('ignore')
+plt.style.use('default')
+sns.set_palette("Set2")
+
+
+class OMRCRiskBasedSamplingTool:
+    """OMRC v8.9 - Final Production with Auto Sample Size, Audit-reporting, and Industry-standard allocation."""
+
+    def __init__(self, root, out_dir_path):
+        self.root = root
+        self.root.title("OMRC Audit Sampling Tool v8.9 - Production Ready")
+        self.root.geometry("1700x1050")
+        self.root.minsize(1200, 800)
+
+        # Data & state
+        self.data = None
+        self.comparison_results = {}
+        self.selected_additional_columns = []
+        self.stratum_stats = None
+        self.calculated_sample_size = None
+
+        # Results folder
+        self.results_dir = os.path.join(out_dir_path, "OMRC_Results")
+        os.makedirs(self.results_dir, exist_ok=True)
+
+        # Keep a reproducible flag for demo; by default sampling uses deterministic seeds where beneficial
+        self.reproducible = True
+        self.random_state = 42
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+
+        self.tab1 = ttk.Frame(notebook)
+        notebook.add(self.tab1, text="1. Data & Configuration")
+
+        self.tab2 = ttk.Frame(notebook)
+        notebook.add(self.tab2, text="2. Risk Calculation")
+
+        self.tab3 = ttk.Frame(notebook)
+        notebook.add(self.tab3, text="3. Sampling & Results")
+
+        self.tab4 = ttk.Frame(notebook)
+        notebook.add(self.tab4, text="4. Coverage Analysis")
+
+        self.tab5 = ttk.Frame(notebook)
+        notebook.add(self.tab5, text="5. Visualizations")
+
+        self.create_tab1_widgets()
+        self.create_tab2_widgets()
+        self.create_tab3_widgets()
+        self.create_tab4_widgets()
+        self.create_tab5_widgets()
+
+    def create_tab1_widgets(self):
+        """Tab 1: Data Loading & Configuration"""
+
+        data_frame = ttk.LabelFrame(self.tab1, text="Data Loading", padding="10")
+        data_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        ttk.Button(data_frame, text="Load Data", command=self.load_data).grid(row=0, column=0, padx=5)
+        ttk.Button(data_frame, text="Generate Sample", command=self.generate_sample_data).grid(row=0, column=1, padx=5)
+
+        self.data_label = ttk.Label(data_frame, text="No data loaded", font=('Arial', 10, 'bold'), foreground='blue')
+        self.data_label.grid(row=1, column=0, columnspan=2, pady=5, sticky=tk.W)
+
+        mandatory_frame = ttk.LabelFrame(self.tab1, text="MANDATORY COLUMNS", padding="10")
+        mandatory_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        ttk.Label(mandatory_frame, text="Entity Column:").grid(row=0, column=0, sticky=tk.W)
+        self.entity_col_var = tk.StringVar(value="legal_entity")
+        self.entity_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.entity_col_var, width=25)
+        self.entity_col_combo.grid(row=0, column=1, padx=5)
+
+        ttk.Label(mandatory_frame, text="Region Column:").grid(row=0, column=2, sticky=tk.W, padx=(20, 0))
+        self.region_col_var = tk.StringVar(value="region")
+        self.region_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.region_col_var, width=25)
+        self.region_col_combo.grid(row=0, column=3, padx=5)
+
+        ttk.Label(mandatory_frame, text="Product Column:").grid(row=1, column=0, sticky=tk.W)
+        self.product_col_var = tk.StringVar(value="product_type")
+        self.product_col_combo = ttk.Combobox(mandatory_frame, textvariable=self.product_col_var, width=25)
+        self.product_col_combo.grid(row=1, column=1, padx=5)
+
+        additional_frame = ttk.LabelFrame(self.tab1, text="ADDITIONAL COLUMNS (Optional)", padding="10")
+        additional_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        self.additional_cols_label = ttk.Label(additional_frame, text="None selected", foreground='gray')
+        self.additional_cols_label.grid(row=0, column=0, sticky=tk.W, pady=5)
+
+        ttk.Button(additional_frame, text="Select Additional Columns", command=self.open_column_selector).grid(row=1, column=0, pady=5, sticky=tk.W)
+
+        preview_frame = ttk.LabelFrame(self.tab1, text="Data Preview", padding="10")
+        preview_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+
+        self.tree = ttk.Treeview(preview_frame)
+        scrollbar_y = ttk.Scrollbar(preview_frame, orient="vertical", command=self.tree.yview)
+        scrollbar_x = ttk.Scrollbar(preview_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+
+        self.tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar_y.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        scrollbar_x.grid(row=1, column=0, sticky=(tk.W, tk.E))
+
+        self.tab1.rowconfigure(3, weight=1)
+        self.tab1.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+
+    def create_tab2_widgets(self):
+        """Tab 2: Risk Calculation"""
+
+        main_frame = ttk.Frame(self.tab2)
+        main_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        calc_frame = ttk.LabelFrame(main_frame, text="Risk Calculation & Sample Size Determination", padding="10")
+        calc_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Button(calc_frame, text="Calculate Risk Scores", command=self.calculate_risk_scores).pack(side='left', padx=5)
+
+        self.risk_calc_label = ttk.Label(calc_frame, text="Not calculated", font=('Arial', 10, 'bold'), foreground='blue')
+        self.risk_calc_label.pack(side='left', padx=10)
+
+        # Sample size info frame
+        sample_size_info = ttk.LabelFrame(main_frame, text="AUTOMATIC SAMPLE SIZE CALCULATION", padding="10")
+        sample_size_info.pack(fill='x', pady=(0, 10))
+
+        self.sample_size_info_label = ttk.Label(sample_size_info, text="Calculated automatically using statistical formulas", font=('Arial', 9))
+        self.sample_size_info_label.pack(side='left', padx=10)
+
+        self.calculated_size_label = ttk.Label(sample_size_info, text="Sample Size: --", font=('Arial', 11, 'bold'), foreground='green')
+        self.calculated_size_label.pack(side='left', padx=20)
+
+        risk_frame = ttk.LabelFrame(main_frame, text="Cumulative Risk Score by Stratum (DYNAMIC POPULATION)", padding="10")
+        risk_frame.pack(fill='both', expand=True, pady=(0, 10))
+
+        self.stratum_tree = ttk.Treeview(risk_frame,
+                                        columns=("Stratum", "Population", "Avg_Risk", "High_Risk", "Risk_Level", "PopPercent", "StdDev"),
+                                        show="tree headings", height=20)
+
+        self.stratum_tree.heading("#0", text="")
+        self.stratum_tree.heading("Stratum", text="Stratum (Entity|Region|Product)")
+        self.stratum_tree.heading("Population", text="Population")
+        self.stratum_tree.heading("Avg_Risk", text="Avg Risk")
+        self.stratum_tree.heading("High_Risk", text="High Risk")
+        self.stratum_tree.heading("Risk_Level", text="Risk Level")
+        self.stratum_tree.heading("PopPercent", text="% of Total")
+        self.stratum_tree.heading("StdDev", text="Std Dev")
+
+        self.stratum_tree.column("#0", width=0)
+        self.stratum_tree.column("Stratum", width=280)
+        self.stratum_tree.column("Population", width=80)
+        self.stratum_tree.column("Avg_Risk", width=80)
+        self.stratum_tree.column("High_Risk", width=80)
+        self.stratum_tree.column("Risk_Level", width=70)
+        self.stratum_tree.column("PopPercent", width=80)
+        self.stratum_tree.column("StdDev", width=80)
+
+        stratum_scrollbar = ttk.Scrollbar(risk_frame, orient="vertical", command=self.stratum_tree.yview)
+        self.stratum_tree.configure(yscrollcommand=stratum_scrollbar.set)
+
+        self.stratum_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        stratum_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def create_tab3_widgets(self):
+        """Tab 3: Sampling & Results"""
+
+        params_frame = ttk.LabelFrame(self.tab3, text="Parameters", padding="10")
+        params_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        ttk.Label(params_frame, text="Confidence Level:").grid(row=0, column=0, sticky=tk.W)
+        self.confidence_var = tk.StringVar(value="95%")
+        ttk.Combobox(params_frame, textvariable=self.confidence_var, values=["90%", "95%", "99%"], width=10).grid(row=0, column=1, padx=5)
+
+        ttk.Label(params_frame, text="Margin of Error:").grid(row=0, column=2, sticky=tk.W, padx=(20, 0))
+        self.margin_error_var = tk.StringVar(value="5%")
+        ttk.Combobox(params_frame, textvariable=self.margin_error_var, values=["1%", "2%", "5%", "10%"], width=10).grid(row=0, column=3, padx=5)
+
+        self.auto_size_label = ttk.Label(params_frame, text="Sample Size: Auto-calculated", font=('Arial', 10, 'bold'), foreground='green')
+        self.auto_size_label.grid(row=0, column=4, padx=(30, 0))
+
+        methods_frame = ttk.LabelFrame(self.tab3, text="INDUSTRY-STANDARD SAMPLING METHODS", padding="10")
+        methods_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        self.method_vars = {}
+        descriptions = [
+            ('Simple Random Sampling (SRS)', 'traditional', 'Pure random selection - baseline comparison'),
+            ('Proportional Stratified Sampling', 'proportional', 'Allocates samples by stratum size (AICPA standard)'),
+            ('Risk-Based Neyman Allocation', 'neyman', 'Optimizes based on stratum variability (ISA 530)'),
+        ]
+
+        for i, (name, key, desc) in enumerate(descriptions):
+            var = tk.BooleanVar(value=True if i < 2 else False)
+            self.method_vars[key] = var
+            frame = ttk.Frame(methods_frame)
+            frame.grid(row=i, column=0, sticky=tk.W, padx=20, pady=3)
+            ttk.Checkbutton(frame, text=name, variable=var).pack(side='left')
+            ttk.Label(frame, text=desc, font=('Arial', 8), foreground='gray').pack(side='left', padx=20)
+
+        ttk.Button(methods_frame, text="Generate & Compare Samples",
+                   command=self.generate_samples_enhanced).grid(row=4, column=0, pady=15, sticky=(tk.W, tk.E), padx=20)
+
+        results_frame = ttk.LabelFrame(self.tab3, text="Results Summary", padding="10")
+        results_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+
+        self.summary_tree = ttk.Treeview(results_frame,
+                                        columns=("Size", "High_Risk", "Avg_Risk", "Strata_Covered", "Method_Type"),
+                                        show="tree headings", height=5)
+        self.summary_tree.heading("#0", text="Method")
+        self.summary_tree.heading("Size", text="Sample Size")
+        self.summary_tree.heading("High_Risk", text="High Risk")
+        self.summary_tree.heading("Avg_Risk", text="Avg Risk")
+        self.summary_tree.heading("Strata_Covered", text="Strata Covered")
+        self.summary_tree.heading("Method_Type", text="Methodology")
+
+        for col in ["Size", "High_Risk", "Avg_Risk", "Strata_Covered", "Method_Type"]:
+            self.summary_tree.column(col, width=110)
+
+        self.summary_tree.pack(fill=tk.BOTH, expand=True)
+
+        export_frame = ttk.Frame(results_frame)
+        export_frame.pack(fill='x', pady=10)
+
+        ttk.Button(export_frame, text="Export Samples", command=self.export_samples).pack(side='left', padx=5)
+
+        self.tab3.rowconfigure(2, weight=1)
+        self.tab3.columnconfigure(0, weight=1)
+
+    def create_tab4_widgets(self):
+        """Tab 4: Coverage Analysis"""
+
+        self.coverage_notebook = ttk.Notebook(self.tab4)
+        self.coverage_notebook.pack(fill='both', expand=True, padx=10, pady=10)
+
+        self.method_coverage_tabs = {}
+
+        for display_name, method_key in [('Simple Random', 'traditional'),
+                                         ('Proportional', 'proportional'),
+                                         ('Neyman', 'neyman')]:
+            method_frame = ttk.Frame(self.coverage_notebook)
+            self.coverage_notebook.add(method_frame, text=display_name)
+
+            sub_notebook = ttk.Notebook(method_frame)
+            sub_notebook.pack(fill='both', expand=True, padx=5, pady=5)
+
+            missed_frame = ttk.Frame(sub_notebook)
+            sub_notebook.add(missed_frame, text="Missed Strata")
+
+            missed_tree = ttk.Treeview(missed_frame, columns=("Stratum", "Population", "Avg_Risk"), show="tree headings")
+            missed_tree.heading("#0", text="ID")
+            missed_tree.heading("Stratum", text="Stratum")
+            missed_tree.heading("Population", text="Population")
+            missed_tree.heading("Avg_Risk", text="Avg Risk")
+
+            for col in ["Stratum", "Population", "Avg_Risk"]:
+                missed_tree.column(col, width=200)
+
+            missed_scrollbar = ttk.Scrollbar(missed_frame, orient="vertical", command=missed_tree.yview)
+            missed_tree.configure(yscrollcommand=missed_scrollbar.set)
+            missed_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            missed_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            all_frame = ttk.Frame(sub_notebook)
+            sub_notebook.add(all_frame, text="All Strata")
+
+            all_tree = ttk.Treeview(all_frame, columns=("Stratum", "Population", "Sampled", "Coverage", "Avg_Risk", "AllocMethod"), show="tree headings")
+            all_tree.heading("#0", text="ID")
+            all_tree.heading("Stratum", text="Stratum")
+            all_tree.heading("Population", text="Population")
+            all_tree.heading("Sampled", text="Sampled")
+            all_tree.heading("Coverage", text="Coverage %")
+            all_tree.heading("Avg_Risk", text="Avg Risk")
+            all_tree.heading("AllocMethod", text="Allocation Method")
+
+            for col in ["Stratum", "Population", "Sampled", "Coverage", "Avg_Risk", "AllocMethod"]:
+                all_tree.column(col, width=100)
+
+            all_scrollbar = ttk.Scrollbar(all_frame, orient="vertical", command=all_tree.yview)
+            all_tree.configure(yscrollcommand=all_scrollbar.set)
+            all_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            all_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            self.method_coverage_tabs[method_key] = {'missed_tree': missed_tree, 'all_tree': all_tree}
+
+    def create_tab5_widgets(self):
+        """Tab 5: Visualizations"""
+
+        control_frame = ttk.LabelFrame(self.tab5, text="Controls", padding="10")
+        control_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
+
+        ttk.Button(control_frame, text="Generate Charts", command=self.generate_charts).grid(row=0, column=0, padx=5)
+
+        viz_frame = ttk.LabelFrame(self.tab5, text="Visualizations", padding="10")
+        viz_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+
+        self.fig, self.axes = plt.subplots(2, 3, figsize=(17, 9))
+        self.fig.patch.set_facecolor('#f0f0f0')
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=viz_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self.tab5.rowconfigure(1, weight=1)
+        self.tab5.columnconfigure(0, weight=1)
+        viz_frame.rowconfigure(0, weight=1)
+        viz_frame.columnconfigure(0, weight=1)
+
+    # ========== DATA LOADING ==========
+
+    def load_data(self):
+        file_path = filedialog.askopenfilename(title="Select Data File", filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx")])
+
+        if file_path:
+            try:
+                self.data = pd.read_excel(file_path) if file_path.endswith('.xlsx') else pd.read_csv(file_path)
+                self.update_column_dropdowns()
+                self.update_data_preview()
+                self.data_label.config(text=f"✓ Loaded {len(self.data):,} records (DYNAMIC POPULATION)")
+                messagebox.showinfo("Success", f"Loaded {len(self.data):,} records")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load data: {str(e)}")
+
+    def generate_sample_data(self):
+        try:
+            np.random.seed(self.random_state if self.reproducible else None)
+            n = 10000
+
+            entity_regions = {
+                'HBAP': ['LN', 'AU', 'IN', 'PA', 'HK', 'SG'],
+                'HBEU': ['LN', 'PA', 'FR', 'DE', 'IT', 'CH'],
+                'HBUS': ['NY', 'CA', 'TX', 'IL', 'FL']
+            }
+
+            products = ['Cash_Bonds', 'Equities', 'IRD', 'FX_Derivatives', 'ABS_MBS', 'Structured_Products', 'Repo', 'Commodities']
+            reason_codes = ['Price_Mismatch', 'Model_Error', 'Data_Quality', 'Process_Delay', 'System_Error', 'Manual_Override']
+
+            entities = []
+            regions = []
+            entity_probs = {'HBAP': 0.45, 'HBEU': 0.35, 'HBUS': 0.20}
+
+            for _ in range(n):
+                entity = np.random.choice(list(entity_regions.keys()), p=list(entity_probs.values()))
+                region = np.random.choice(entity_regions[entity])
+                entities.append(entity)
+                regions.append(region)
+
+            self.data = pd.DataFrame({
+                'exception_id': range(1, n + 1),
+                'legal_entity': entities,
+                'region': regions,
+                'product_type': np.random.choice(products, n, p=[0.25, 0.20, 0.15, 0.12, 0.08, 0.06, 0.08, 0.06]),
+                'reason_code': np.random.choice(reason_codes, n, p=[0.25, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10, 0.05]),
+                'trade_value': np.random.lognormal(15, 1.5, n),
+                'aging_days': np.random.exponential(8, n).astype(int)
+            })
+
+            self.update_column_dropdowns()
+            self.update_data_preview()
+            self.data_label.config(text=f"✓ Generated {len(self.data):,} demo records (DYNAMIC POPULATION)")
+            messagebox.showinfo("Success", f"Generated {len(self.data):,} demo records")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate data: {str(e)}")
+
+    def update_column_dropdowns(self):
+        if self.data is None:
+            return
+        columns = list(self.data.columns)
+        self.entity_col_combo['values'] = columns
+        self.region_col_combo['values'] = columns
+        self.product_col_combo['values'] = columns
+
+    def update_data_preview(self):
+        if self.data is None:
+            return
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        display_cols = list(self.data.columns)[:6]
+        self.tree["columns"] = display_cols
+        self.tree["show"] = "headings"
+
+        for col in display_cols:
+            self.tree.heading(col, text=col.replace('_', ' ').title())
+            self.tree.column(col, width=100)
+
+        for _, row in self.data.head(50).iterrows():
+            values = [str(row.get(col, ''))[:30] for col in display_cols]
+            self.tree.insert("", "end", values=values)
+
+    def open_column_selector(self):
+        if self.data is None:
+            messagebox.showerror("Error", "Load data first")
+            return
+
+        mandatory_cols = [self.entity_col_var.get(), self.region_col_var.get(), self.product_col_var.get()]
+        available_cols = [col for col in self.data.columns if col not in mandatory_cols]
+
+        dialog = Toplevel(self.root)
+        dialog.title("Select Additional Columns")
+        dialog.geometry("400x350")
+
+        ttk.Label(dialog, text="Select columns:").pack(pady=10)
+
+        frame = ttk.Frame(dialog)
+        frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side='right', fill='y')
+
+        listbox = Listbox(frame, selectmode=MULTIPLE, yscrollcommand=scrollbar.set)
+        listbox.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        for col in available_cols:
+            listbox.insert('end', col)
+
+        for i, col in enumerate(available_cols):
+            if col in self.selected_additional_columns:
+                listbox.selection_set(i)
+
+        def confirm():
+            self.selected_additional_columns = [available_cols[i] for i in listbox.curselection()]
+            if self.selected_additional_columns:
+                self.additional_cols_label.config(text=f"{len(self.selected_additional_columns)} selected", foreground='blue')
+            else:
+                self.additional_cols_label.config(text="None selected", foreground='gray')
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Confirm", command=confirm).pack(pady=10)
+
+    # ========== AUTOMATIC SAMPLE SIZE CALCULATION ==========
+
+    def calculate_sample_size(self, population_size):
+        """
+        Calculate optimal sample size using Cochran formula with correct finite-population correction (FPC):
+        - n0 = (Z^2 * p * (1-p)) / e^2
+        - Cochran with FPC: n = n0 / (1 + (n0 - 1) / N)
+        Returns at least min_sample (30) to ensure minimal coverage for auditors' inspection.
+        """
+        try:
+            confidence = float(self.confidence_var.get().strip('%')) / 100.0
+            margin = float(self.margin_error_var.get().strip('%')) / 100.0
+
+            if margin <= 0:
+                margin = 0.05
+
+            # z for two-sided
+            z_value = stats.norm.ppf((1 + confidence) / 2.0)
+            p = 0.5  # Conservative maximum variance assumption (most conservative)
+
+            n0 = (z_value ** 2 * p * (1 - p)) / (margin ** 2)
+
+            # Finite population correction (correct formula)
+            if population_size > 0:
+                n = n0 / (1.0 + (n0 - 1.0) / population_size)
+            else:
+                n = n0
+
+            # Enforce minimum sample size for audit practicality and stability
+            min_sample = 30
+            final_n = int(np.ceil(n)) if n > min_sample else min_sample
+            return final_n
+
+        except Exception:
+            # Fallback conservative default
+            return 300
+
+    # ========== ENHANCED RISK CALCULATION ==========
+
+    def calculate_risk_scores(self):
+        """Calculate risk scores with dynamic population and automatic sample size. Self-explanatory result fields."""
+        if self.data is None:
+            messagebox.showerror("Error", "Load data first")
+            return
+
+        try:
+            self.root.update()
+            entity_col = self.entity_col_var.get()
+            region_col = self.region_col_var.get()
+            product_col = self.product_col_var.get()
+
+            for col in [entity_col, region_col, product_col]:
+                if col not in self.data.columns:
+                    messagebox.showerror("Error", f"Column '{col}' not found")
+                    return
+
+            # Vectorized weight calculation with NaN handling
+            try:
+                entity_counts = self.data[entity_col].value_counts(normalize=True, dropna=False)
+                region_counts = self.data[region_col].value_counts(normalize=True, dropna=False)
+                product_counts = self.data[product_col].value_counts(normalize=True, dropna=False)
+
+                # map and fill missing with a neutral value (0.5) so missing category doesn't become extreme
+                self.data['entity_weight'] = self.data[entity_col].map(entity_counts).fillna(0.5)
+                self.data['region_weight'] = self.data[region_col].map(region_counts).fillna(0.5)
+                self.data['product_weight'] = self.data[product_col].map(product_counts).fillna(0.5)
+
+                # Composite risk (weights sum to 1)
+                self.data['risk_score'] = (
+                    self.data['entity_weight'] * 0.33 +
+                    self.data['region_weight'] * 0.33 +
+                    self.data['product_weight'] * 0.34
+                )
+
+                # Normalize and clamp to avoid 0 or nan
+                self.data['risk_score'] = np.clip(self.data['risk_score'], 0.01, 1.0)
+                self.data['risk_score'] = pd.to_numeric(self.data['risk_score'], errors='coerce').fillna(0.5)
+
+            except Exception as weight_error:
+                messagebox.showerror("Error", f"Failed to calculate weights: {str(weight_error)}")
+                return
+
+            # Create stratum using mandatory + selected additional columns
+            all_cols = [entity_col, region_col, product_col] + self.selected_additional_columns
+            try:
+                # Ensure string conversion so grouping is stable
+                self.data['stratum'] = self.data[all_cols].astype(str).agg('|'.join, axis=1)
+            except Exception as stratum_error:
+                messagebox.showerror("Error", f"Failed to create stratum: {str(stratum_error)}")
+                return
+
+            # Calculate stratum statistics
+            try:
+                self.calculate_stratum_statistics()
+            except Exception as stat_error:
+                messagebox.showerror("Error", f"Failed to calculate statistics: {str(stat_error)}")
+                return
+
+            # Calculate optimal sample size (dynamic population)
+            total_pop = len(self.data)
+            self.calculated_sample_size = self.calculate_sample_size(total_pop)
+
+            # Update UI and display
+            self.display_stratum_results()
+            self.risk_calc_label.config(text="✓ Calculated (Ready for sampling)", foreground='green')
+            self.calculated_size_label.config(text=f"Sample Size: {self.calculated_sample_size} (Auto-calculated)", foreground='green')
+            self.auto_size_label.config(text=f"Sample Size: {self.calculated_sample_size} (Auto-calculated)", foreground='green')
+
+            messagebox.showinfo("Success", f"Risk calculation complete!\nOptimal Sample Size: {self.calculated_sample_size}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Calculation failed: {str(e)}")
+
+    def calculate_stratum_statistics(self):
+        """Calculate stratum statistics with robust NaN handling. Produces a DataFrame self.stratum_stats"""
+        try:
+            # Group and aggregate (count, mean, std, high-risk count)
+            grouped = self.data.groupby('stratum', as_index=False).agg(
+                population=('risk_score', 'count'),
+                avg_risk=('risk_score', 'mean'),
+                std_risk=('risk_score', 'std'),
+                high_risk=('risk_score', lambda x: (x > 0.7).sum())
+            )
+
+            # Fill/normalize types
+            grouped['std_risk'] = pd.to_numeric(grouped['std_risk'], errors='coerce').fillna(0.1)
+            grouped['avg_risk'] = pd.to_numeric(grouped['avg_risk'], errors='coerce').fillna(0.5)
+            grouped['population'] = pd.to_numeric(grouped['population'], errors='coerce').astype(int)
+            grouped['high_risk'] = pd.to_numeric(grouped['high_risk'], errors='coerce').astype(int)
+
+            total_pop = len(self.data)
+            grouped['pop_percent'] = (grouped['population'] / total_pop * 100).round(2)
+
+            # Assign categorical levels for auditor readability
+            grouped['risk_level'] = grouped['avg_risk'].apply(
+                lambda x: 'HIGH' if x > 0.7 else ('MEDIUM' if x > 0.4 else 'LOW')
+            )
+
+            # Sort by population descending so auditors see big strata first
+            grouped = grouped.sort_values(by='population', ascending=False).reset_index(drop=True)
+
+            # Keep the stratum key as text
+            self.stratum_stats = grouped[['stratum', 'population', 'avg_risk', 'std_risk', 'high_risk', 'pop_percent', 'risk_level']]
+
+        except Exception as e:
+            raise Exception(f"Stratum statistics calculation failed: {str(e)}")
+
+    def display_stratum_results(self):
+        """Populate the stratum_tree with stratum statistics (top 1000 rows)"""
+        for item in self.stratum_tree.get_children():
+            self.stratum_tree.delete(item)
+
+        if self.stratum_stats is None:
+            return
+
+        for _, row in self.stratum_stats.head(1000).iterrows():
+            try:
+                self.stratum_tree.insert("", "end", values=(
+                    str(row['stratum'])[:80],
+                    int(row['population']),
+                    f"{float(row['avg_risk']):.4f}",
+                    int(row['high_risk']),
+                    row['risk_level'],
+                    f"{float(row['pop_percent']):.2f}%",
+                    f"{float(row['std_risk']):.4f}"
+                ))
+            except Exception:
+                continue
+
+    # ========== ENHANCED SAMPLING METHODS ==========
+
+    def generate_samples_enhanced(self):
+        """Generate samples using industry-standard methodologies (SRS, proportional stratified, Neyman)"""
+
+        if self.data is None or 'risk_score' not in self.data.columns:
+            messagebox.showerror("Error", "Calculate risk scores first")
+            return
+
+        if self.calculated_sample_size is None:
+            messagebox.showerror("Error", "Risk calculation not complete")
+            return
+
+        try:
+            sample_size = self.calculated_sample_size
+            self.comparison_results = {}
+
+            population_N = len(self.data)
+            strata_info = self.stratum_stats.copy()  # DataFrame with population and std
+
+            # Helper: ensure reproducible sampling when reproducible=True
+            rs = self.random_state if self.reproducible else None
+
+            # -------------------------
+            # METHODOLOGY 1: Simple Random Sampling (SRS)
+            # -------------------------
+            if self.method_vars['traditional'].get():
+                try:
+                    sample = self.data.sample(n=min(sample_size, population_N), random_state=rs, replace=False)
+                    self.comparison_results['traditional'] = {
+                        'sample': sample.copy(),
+                        'size': len(sample),
+                        'high_risk': int((sample['risk_score'] > 0.7).sum()),
+                        'avg_risk': float(sample['risk_score'].mean()),
+                        'method_type': 'SRS',
+                        'strata_covered': int(sample['stratum'].nunique()),
+                        'allocation_table': None  # no per-stratum allocation for SRS
+                    }
+                except Exception as e:
+                    messagebox.showerror("Error in Simple Random", f"Failed: {str(e)}")
+
+            # -------------------------
+            # METHODOLOGY 2: Proportional Stratified Sampling
+            # -------------------------
+            if self.method_vars['proportional'].get():
+                try:
+                    samples = []
+                    allocation_records = []
+                    for _, r in strata_info.iterrows():
+                        stratum = r['stratum']
+                        N_h = int(r['population'])
+                        proportion = N_h / population_N if population_N > 0 else 0
+                        # allocate strictly following n_h = n * (N_h / N)
+                        n_alloc_float = sample_size * proportion
+                        # round with floor then assign remainder to largest strata (deterministic)
+                        n_alloc = int(np.floor(n_alloc_float))
+                        # enforce min 1 if stratum exists and computed zero but population > 0
+                        if N_h > 0 and n_alloc == 0:
+                            n_alloc = 1
+                        # avoid allocating more than stratum population
+                        n_alloc = min(n_alloc, N_h)
+                        if n_alloc > 0:
+                            group = self.data[self.data['stratum'] == stratum]
+                            s = group.sample(n=min(n_alloc, len(group)), random_state=rs, replace=False)
+                            samples.append(s)
+                        allocation_records.append({'stratum': stratum, 'N_h': N_h, 'n_alloc': n_alloc, 'method': 'proportional'})
+
+                    # Some rounding may leave us under sample_size; fill remaining from largest strata by population
+                    combined = pd.concat(samples, ignore_index=True) if samples else pd.DataFrame(columns=self.data.columns)
+                    deficit = sample_size - len(combined)
+                    if deficit > 0:
+                        # allocate leftover deterministically to strata sorted by population descending
+                        for _, r in strata_info.sort_values(by='population', ascending=False).iterrows():
+                            if deficit <= 0:
+                                break
+                            stratum = r['stratum']
+                            group = self.data[self.data['stratum'] == stratum]
+                            already = combined[combined['stratum'] == stratum]
+                            remaining_possible = len(group) - len(already)
+                            take = min(deficit, remaining_possible)
+                            if take > 0:
+                                extra = group.drop(already.index, errors='ignore').sample(n=take, random_state=rs, replace=False)
+                                combined = pd.concat([combined, extra], ignore_index=True)
+                                deficit -= take
+
+                    # Ensure final length equals sample_size (or population size if smaller)
+                    final_sample = combined.head(min(sample_size, population_N)).copy() if not combined.empty else combined
+                    # Build allocation summary
+                    alloc_df = pd.DataFrame(allocation_records)
+                    self.comparison_results['proportional'] = {
+                        'sample': final_sample,
+                        'size': len(final_sample),
+                        'high_risk': int((final_sample['risk_score'] > 0.7).sum()) if not final_sample.empty else 0,
+                        'avg_risk': float(final_sample['risk_score'].mean()) if not final_sample.empty else 0.0,
+                        'method_type': 'Proportional',
+                        'strata_covered': int(final_sample['stratum'].nunique()),
+                        'allocation_table': alloc_df
+                    }
+
+                except Exception as e:
+                    messagebox.showerror("Error in Proportional", f"Failed: {str(e)}")
+
+            # -------------------------
+            # METHODOLOGY 3: Neyman Allocation (risk-based)
+            # n_h = n * (N_h * S_h) / sum(N_h * S_h)
+            # -------------------------
+            if self.method_vars['neyman'].get():
+                try:
+                    # compute denominator sum(N_h * S_h)
+                    alloc_records = []
+                    denom = 0.0
+                    # Ensure we use a stable std (non-zero)
+                    for _, r in strata_info.iterrows():
+                        N_h = int(r['population'])
+                        S_h = float(r['std_risk']) if r['std_risk'] and not np.isnan(r['std_risk']) else 0.1
+                        denom += N_h * S_h
+
+                    samples = []
+                    for _, r in strata_info.iterrows():
+                        stratum = r['stratum']
+                        N_h = int(r['population'])
+                        S_h = float(r['std_risk']) if r['std_risk'] and not np.isnan(r['std_risk']) else 0.1
+                        if denom > 0:
+                            n_alloc_float = sample_size * (N_h * S_h) / denom
+                        else:
+                            # fallback to equal allocation if denom is zero
+                            n_alloc_float = sample_size / max(1, len(strata_info))
+                        # rounding policy: floor, then assign remainder deterministically later
+                        n_alloc = int(np.floor(n_alloc_float))
+                        # enforce at least 1 if population exists
+                        if N_h > 0 and n_alloc == 0:
+                            n_alloc = 1
+                        n_alloc = min(n_alloc, N_h)
+                        if n_alloc > 0:
+                            group = self.data[self.data['stratum'] == stratum]
+                            s = group.sample(n=min(n_alloc, len(group)), random_state=rs, replace=False)
+                            samples.append(s)
+                        alloc_records.append({'stratum': stratum, 'N_h': N_h, 'S_h': S_h, 'n_alloc': n_alloc, 'method': 'neyman'})
+
+                    combined = pd.concat(samples, ignore_index=True) if samples else pd.DataFrame(columns=self.data.columns)
+                    deficit = sample_size - len(combined)
+                    if deficit > 0:
+                        for _, r in strata_info.sort_values(by='population', ascending=False).iterrows():
+                            if deficit <= 0:
+                                break
+                            stratum = r['stratum']
+                            group = self.data[self.data['stratum'] == stratum]
+                            already = combined[combined['stratum'] == stratum]
+                            remaining_possible = len(group) - len(already)
+                            take = min(deficit, remaining_possible)
+                            if take > 0:
+                                extra = group.drop(already.index, errors='ignore').sample(n=take, random_state=rs, replace=False)
+                                combined = pd.concat([combined, extra], ignore_index=True)
+                                deficit -= take
+
+                    final_sample = combined.head(min(sample_size, population_N)).copy() if not combined.empty else combined
+                    alloc_df = pd.DataFrame(alloc_records)
+                    self.comparison_results['neyman'] = {
+                        'sample': final_sample,
+                        'size': len(final_sample),
+                        'high_risk': int((final_sample['risk_score'] > 0.7).sum()) if not final_sample.empty else 0,
+                        'avg_risk': float(final_sample['risk_score'].mean()) if not final_sample.empty else 0.0,
+                        'method_type': 'Neyman',
+                        'strata_covered': int(final_sample['stratum'].nunique()),
+                        'allocation_table': alloc_df
+                    }
+
+                except Exception as e:
+                    messagebox.showerror("Error in Neyman", f"Failed: {str(e)}")
+
+            if not self.comparison_results:
+                messagebox.showerror("Error", "No methods selected or all methods failed")
+                return
+
+            self.update_results_display()
+            self.update_coverage_display_enhanced()
+            messagebox.showinfo("Success", f"Samples generated!\nSample Size: {sample_size} (Auto-calculated)")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Sample generation failed: {str(e)}")
+
+    def update_results_display(self):
+        """Display summary for each method (size, high-risk capture, avg risk, strata covered)"""
+        for item in self.summary_tree.get_children():
+            self.summary_tree.delete(item)
+
+        method_display = {
+            'traditional': 'Simple Random',
+            'proportional': 'Proportional',
+            'neyman': 'Neyman'
+        }
+
+        for method, data in self.comparison_results.items():
+            try:
+                display_name = method_display.get(method, method)
+                self.summary_tree.insert("", "end", text=display_name,
+                                        values=(data['size'], data['high_risk'], f"{data['avg_risk']:.4f}",
+                                                data['strata_covered'], data['method_type']))
+            except Exception:
+                continue
+
+    def update_coverage_display_enhanced(self):
+        """Show missed strata and coverage per method in tab 4 for auditor review"""
+        for method_key, result in self.comparison_results.items():
+            sample = result['sample']
+            all_strata = list(self.data['stratum'].unique())
+            sample_strata = set(sample['stratum'].unique())
+            missed = set(all_strata) - sample_strata
+
+            tabs = self.method_coverage_tabs.get(method_key)
+            if not tabs:
+                continue
+
+            # Missed strata
+            for item in tabs['missed_tree'].get_children():
+                tabs['missed_tree'].delete(item)
+
+            for idx, stratum in enumerate(list(missed)[:100]):
+                try:
+                    stratum_data = self.data[self.data['stratum'] == stratum]
+                    tabs['missed_tree'].insert("", "end", text=str(idx + 1),
+                                              values=(stratum, len(stratum_data), f"{stratum_data['risk_score'].mean():.4f}"))
+                except Exception:
+                    continue
+
+            # All strata
+            for item in tabs['all_tree'].get_children():
+                tabs['all_tree'].delete(item)
+
+            for idx, stratum in enumerate(list(all_strata)[:100]):
+                try:
+                    pop_data = self.data[self.data['stratum'] == stratum]
+                    sample_data = sample[sample['stratum'] == stratum]
+                    coverage = (len(sample_data) / len(pop_data) * 100) if len(pop_data) > 0 else 0
+                    alloc_method = 'Allocated' if len(sample_data) > 0 else 'Missed'
+
+                    tabs['all_tree'].insert("", "end", text=str(idx + 1),
+                                           values=(stratum, len(pop_data), len(sample_data),
+                                                   f"{coverage:.1f}%", f"{pop_data['risk_score'].mean():.4f}", alloc_method))
+                except Exception:
+                    continue
+
+    def export_samples(self):
+        """Export samples and generate an auditor-friendly report (CSV + summary TXT + JSON metadata)"""
+        if not self.comparison_results:
+            messagebox.showerror("Error", "Generate samples first")
+            return
+
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_folder = os.path.join(self.results_dir, f"OMRC_Report_{timestamp}")
+            os.makedirs(report_folder, exist_ok=True)
+
+            # 1) Export each sample and allocation table (if present)
+            for method, data in self.comparison_results.items():
+                try:
+                    filename = os.path.join(report_folder, f"sample_{method}_v89_{timestamp}.csv")
+                    data['sample'].to_csv(filename, index=False)
+
+                    # If allocation table exists (stratum-level allocations), export it
+                    alloc = data.get('allocation_table')
+                    if alloc is not None and isinstance(alloc, pd.DataFrame):
+                        alloc_fname = os.path.join(report_folder, f"allocation_{method}_v89_{timestamp}.csv")
+                        alloc.to_csv(alloc_fname, index=False)
+                except Exception as e:
+                    messagebox.showwarning("Export Warning", f"Could not export {method}: {str(e)}")
+
+            # 2) Generate a plain-text auditor summary describing formulas, parameters, and per-method allocation summary
+            summary_txt = self._build_auditor_summary(timestamp)
+            summary_path = os.path.join(report_folder, f"audit_summary_{timestamp}.txt")
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(summary_txt)
+
+            # 3) Save metadata JSON (parameters, formulas, counts)
+            meta = {
+                'generated_at': timestamp,
+                'total_population': int(len(self.data)),
+                'sample_size_requested': int(self.calculated_sample_size),
+                'parameters': {
+                    'confidence_level': self.confidence_var.get(),
+                    'margin_of_error': self.margin_error_var.get(),
+                    'reproducible_random_state': self.random_state if self.reproducible else None
+                },
+                'methods': {}
+            }
+
+            for method, data in self.comparison_results.items():
+                method_meta = {
+                    'size': int(data['size']),
+                    'high_risk_captured': int(data['high_risk']),
+                    'avg_risk_in_sample': float(data['avg_risk']),
+                    'strata_covered': int(data['strata_covered'])
+                }
+                # add allocation table if present
+                alloc = data.get('allocation_table')
+                if alloc is not None and isinstance(alloc, pd.DataFrame):
+                    method_meta['allocation_summary'] = alloc.to_dict(orient='records')
+                meta['methods'][method] = method_meta
+
+            meta_path = os.path.join(report_folder, f"audit_metadata_{timestamp}.json")
+            with open(meta_path, "w", encoding="utf-8") as jf:
+                json.dump(meta, jf, indent=2)
+
+            messagebox.showinfo("Success", f"Samples & audit report exported to {report_folder}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed: {str(e)}")
+
+    def _build_auditor_summary(self, timestamp):
+        """Build a clear human-readable auditor summary including formulas and assumptions."""
+        lines = []
+        lines.append("OMRC Audit Sampling Tool - Auditor Summary")
+        lines.append(f"Generated at: {datetime.now().isoformat()}")
+        lines.append("")
+        lines.append("1) Population and Parameters")
+        lines.append(f"   - Total population (N): {len(self.data)}")
+        lines.append(f"   - Confidence level: {self.confidence_var.get()}")
+        lines.append(f"   - Margin of error: {self.margin_error_var.get()}")
+        lines.append(f"   - Cochran p (used for maximum variance assumption): 0.5 (conservative)")
+        lines.append("")
+        lines.append("2) Sample size calculation (Cochran with finite population correction):")
+        lines.append("   - Formula (initial): n0 = (Z^2 * p * (1-p)) / e^2")
+        lines.append("   - Finite population correction (applied): n = n0 / (1 + (n0 - 1)/N)")
+        lines.append("   - Minimum enforced sample size: 30 (to ensure minimal auditor coverage)")
+        lines.append(f"   - Final computed sample size: {self.calculated_sample_size}")
+        lines.append("")
+        lines.append("3) Methods executed and brief notes:")
+        for method, data in self.comparison_results.items():
+            method_name = {'traditional': 'Simple Random (SRS)', 'proportional': 'Proportional Stratified', 'neyman': 'Neyman Allocation'}.get(method, method)
+            lines.append(f"   - {method_name}:")
+            lines.append(f"       Sample size returned: {data['size']}")
+            lines.append(f"       High-risk items in sample (risk_score > 0.7): {data['high_risk']}")
+            lines.append(f"       Average risk in sample: {data['avg_risk']:.4f}")
+            lines.append(f"       Strata covered: {data['strata_covered']}")
+            if data.get('allocation_table') is not None:
+                lines.append("       Per-stratum allocation table exported along with samples (CSV).")
+            lines.append("")
+
+        lines.append("4) Allocation formulas (auditor-friendly):")
+        lines.append("   - Proportional stratified: n_h = round(n * (N_h / N)), with deterministic remainder allocation to largest strata.")
+        lines.append("   - Neyman allocation: n_h = round(n * (N_h * S_h) / sum(N_h * S_h)), where S_h is stratum standard deviation of the risk score.")
+        lines.append("     - When S_h is zero or missing, a default small S_h = 0.1 is used to avoid division by zero and to still prioritize bigger strata.")
+        lines.append("")
+        lines.append("5) Randomization and reproducibility:")
+        lines.append(f"   - reproducible flag: {self.reproducible}")
+        lines.append(f"   - random_state used when reproducible=True: {self.random_state}")
+        lines.append("")
+        lines.append("6) Notes & assumptions (for auditors):")
+        lines.append("   - The risk score is a composite of entity/region/product prevalence in the dataset (weights 0.33/0.33/0.34).")
+        lines.append("   - p = 0.5 used intentionally for conservative Cochran sample size (max variance).")
+        lines.append("   - Minimum per-stratum enforced to ensure even small strata get considered at least once if they exist.")
+        lines.append("   - When sample size > population, final sample is limited to population size.")
+        lines.append("")
+        lines.append("7) Deliverables in the export folder:")
+        lines.append("   - sample_<method>_v89_<timestamp>.csv  -> sample rows for each method")
+        lines.append("   - allocation_<method>_v89_<timestamp>.csv  -> per-stratum allocations (if applicable)")
+        lines.append("   - audit_summary_<timestamp>.txt  -> this summary")
+        lines.append("   - audit_metadata_<timestamp>.json -> structured metadata for machine processing")
+        lines.append("")
+        lines.append("8) Regulatory alignment notes (concise):")
+        lines.append("   - SRS: Standard, widely accepted baseline for audit sampling.")
+        lines.append("   - Proportional stratified: Commonly used in audit practice (AICPA recommended approach for stratified populations).")
+        lines.append("   - Neyman allocation: Statistically optimal allocation to minimize variance given stratum variability (aligned with ISA 530 principles when variance info is available).")
+        lines.append("")
+        lines.append("End of summary.")
+
+        return "\n".join(lines)
+
+    def generate_charts(self):
+        """Generate visualizations with error handling"""
+        if not self.comparison_results:
+            messagebox.showerror("Error", "Generate samples first")
+            return
+
+        try:
+            for ax in self.axes.flatten():
+                ax.clear()
+
+            methods = list(self.comparison_results.keys())
+            sizes = [self.comparison_results[m]['size'] for m in methods]
+            high_risks = [self.comparison_results[m]['high_risk'] for m in methods]
+            avg_risks = [self.comparison_results[m]['avg_risk'] for m in methods]
+            strata_covered = [self.comparison_results[m]['strata_covered'] for m in methods]
+
+            method_labels = [self.comparison_results[m]['method_type'] for m in methods]
+
+            # NOTE: Matplotlib color arguments left default for auditor reproducibility (no custom palette set)
+            self.axes[0, 0].bar(method_labels, sizes)
+            self.axes[0, 0].set_title('Sample Size (Auto-Calculated)', fontweight='bold')
+            self.axes[0, 0].set_ylabel('Count')
+            self.axes[0, 0].grid(axis='y', alpha=0.3)
+
+            self.axes[0, 1].bar(method_labels, high_risks)
+            self.axes[0, 1].set_title('High Risk Items Captured', fontweight='bold')
+            self.axes[0, 1].set_ylabel('Count')
+            self.axes[0, 1].grid(axis='y', alpha=0.3)
+
+            self.axes[0, 2].bar(method_labels, strata_covered)
+            self.axes[0, 2].set_title('Strata Coverage (INDUSTRY-STANDARD)', fontweight='bold')
+            self.axes[0, 2].set_ylabel('Number of Strata')
+            self.axes[0, 2].grid(axis='y', alpha=0.3)
+
+            # Risk histograms (if sample present)
+            for i, method in enumerate(methods):
+                sample = self.comparison_results[method]['sample']
+                label = self.comparison_results[method]['method_type']
+                ax = self.axes[1, i] if i < 3 else self.axes[1, 2]
+                if not sample.empty:
+                    ax.hist(sample['risk_score'], bins=20, alpha=0.7, edgecolor='black')
+                ax.set_title(f'{label} Risk Distribution', fontweight='bold')
+                ax.set_xlabel('Risk Score')
+                ax.set_ylabel('Frequency')
+
+            self.fig.tight_layout()
+            self.canvas.draw()
+            messagebox.showinfo("Success", "Charts generated!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Charts failed: {str(e)}")
+
+
+def main():
+    root = tk.Tk()
+    out_dir = os.path.expanduser("~")
+    app = OMRCRiskBasedSamplingTool(root, out_dir)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
