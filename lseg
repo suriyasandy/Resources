@@ -31,3 +31,27 @@ response = requests.post(
 
 print("Status:", response.status_code)
 print("Response:", response.text)
+
+
+
+import requests
+
+API_KEY = "your_x_api_key"
+
+url = "https://selectapi.datascope.refinitiv.com/RestApi/v1/Entity/GetSedol"
+
+payload = {
+    "IssueName": "Apple Inc",
+    "CountryOfIssue": "US",
+    "ExchangeCode": "NQ"
+}
+
+headers = {
+    "Content-Type": "application/json",
+    "x-api-key": API_KEY
+}
+
+response = requests.post(url, json=payload, headers=headers)
+
+print("Status:", response.status_code)
+print("Response:", response.text)
