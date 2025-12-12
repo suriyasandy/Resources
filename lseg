@@ -1,24 +1,50 @@
-import base64
 import requests
+import base64
 
+# ---------- Basic Auth (username only) ----------
+USERNAME = "your_username"
+PASSWORD = ""   # empty, since you don't have one
+basic_token = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+# --------------------------------------------------
+
+# ---------- API Key ----------
 API_KEY = "your_x_api_key"
+# ------------------------------
 
-USERNAME = "your_basic_username"
-PASSWORD = ""   # empty since you don't have one
+# ---------- Proxy Credentials ----------
+PROXY_HOST = "your.proxy.server:port"   # e.g. proxy.company.com:8080
+PROXY_USER = "proxy_username"
+PROXY_PASS = "proxy_password"
+# ---------------------------------------
 
-# Build Basic Auth header manually
-token = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+# Build authenticated proxy URL
+proxy_auth_url = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
+
+proxies = {
+    "http": proxy_auth_url,
+    "https": proxy_auth_url
+}
+
+# ---------- LSEG GETSEDOL Endpoint ----------
+url = "https://selectapi.datascope.refinitiv.com/RestApi/v1/Entity/GetSedol"
+# --------------------------------------------
+
+# RAW post body (example)
+raw_body = "SEDOL=0263494"
 
 headers = {
-    "Authorization": f"Basic {token}",
+    "Authorization": f"Basic {basic_token}",
     "x-api-key": API_KEY,
     "Content-Type": "text/plain"
 }
 
-url = "https://selectapi.datascope.refinitiv.com/RestApi/v1/Entity/GetSedol"
-raw_body = "SEDOL=0263494"
+response = requests.post(
+    url,
+    data=raw_body,
+    headers=headers,
+    proxies=proxies,
+    verify=True   # keep True unless your proxy requires SSL interception
+)
 
-response = requests.post(url, data=raw_body, headers=headers)
-
-print(response.status_code)
-print(response.text)
+print("Status Code:", response.status_code)
+print("Response:", response.text)
