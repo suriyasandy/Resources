@@ -1,50 +1,38 @@
 import requests
 import base64
 
-# ---------- Basic Auth (username only) ----------
-USERNAME = "your_username"
-PASSWORD = ""   # empty, since you don't have one
-basic_token = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
-# --------------------------------------------------
+# ---- API Basic Auth ----
+api_user = "EXACT_USERNAME_FROM_POSTMAN"
+api_pass = ""
+api_token = base64.b64encode(f"{api_user}:{api_pass}".encode()).decode()
 
-# ---------- API Key ----------
-API_KEY = "your_x_api_key"
-# ------------------------------
-
-# ---------- Proxy Credentials ----------
-PROXY_HOST = "your.proxy.server:port"   # e.g. proxy.company.com:8080
-PROXY_USER = "proxy_username"
-PROXY_PASS = "proxy_password"
-# ---------------------------------------
-
-# Build authenticated proxy URL
-proxy_auth_url = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
-
-proxies = {
-    "http": proxy_auth_url,
-    "https": proxy_auth_url
-}
-
-# ---------- LSEG GETSEDOL Endpoint ----------
-url = "https://selectapi.datascope.refinitiv.com/RestApi/v1/Entity/GetSedol"
-# --------------------------------------------
-
-# RAW post body (example)
-raw_body = "SEDOL=0263494"
+# ---- Proxy Auth ----
+proxy_user = "proxy_user"
+proxy_pass = "proxy_pass"
+proxy_token = base64.b64encode(f"{proxy_user}:{proxy_pass}".encode()).decode()
 
 headers = {
-    "Authorization": f"Basic {basic_token}",
-    "x-api-key": API_KEY,
-    "Content-Type": "text/plain"
+    # API auth (for LSEG)
+    "Authorization": f"Basic {api_token}",
+    "x-api-key": "your_x_api_key",
+    "Content-Type": "application/json",
+
+    # Proxy auth (explicit)
+    "Proxy-Authorization": f"Basic {proxy_token}",
+}
+
+proxies = {
+    "http": "http://proxy.server.com:8080",
+    "https": "http://proxy.server.com:8080"
 }
 
 response = requests.post(
-    url,
-    data=raw_body,
+    "https://selectapi.datascope.refinitiv.com/RestApi/v1/Entity/GetSedol",
+    json=[{"sedolcode": "0263494"}],
     headers=headers,
     proxies=proxies,
-    verify=True   # keep True unless your proxy requires SSL interception
+    verify=False
 )
 
-print("Status Code:", response.status_code)
-print("Response:", response.text)
+print(response.status_code)
+print(response.text)
