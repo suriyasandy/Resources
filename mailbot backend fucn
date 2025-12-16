@@ -1,0 +1,44 @@
+# BACKEND AUTOMATION & RULE-BASED EXTRACTION
+## Technical Functional Overview
+
+---
+
+## 1. AUTOMATED EMAIL INGESTION & PRE-PROCESSING
+*   **MAPI / EWS Integration:** Backend service polls Outlook/Exchange inbox every 30 seconds.
+*   **Deduplication Logic:** Checks `Message-ID` to prevent processing duplicate emails from multiple distribution lists.
+*   **Metadata Tagging:** Automatically extracts and tags `Sender Domain`, `Subject Line`, `Received Time`, and `Attachment Type`.
+*   **Content Normalization:** Converts HTML bodies to plain text while preserving table structures (using `BeautifulSoup` or similar parsers) to ensure consistent regex application.
+
+## 2. RULE-BASED CLASSIFICATION ENGINE (Weak Supervision)
+*   **Keyword Heuristics:** Scans normalized text for high-signal keywords (e.g., "Rate Quote", "Amendment", "Termination", "Novation").
+*   **Pattern Matching Rules:** Uses regex to identify specific email structures (e.g., `^Product:\s*(Swap|Option|Bond)`) to determine the trade type.
+*   **Confidence Scoring:** Assigns a probability score based on the number of matched rules.
+    *   **High Confidence (>85%):** Automatically routes to the specific extraction config.
+    *   **Low Confidence (<85%):** Routes to a generic parser or flags for manual review.
+
+## 3. CONFIG-DRIVEN FIELD EXTRACTION (Structured Trades)
+*   **Product-Specific Configs:** JSON-based configuration files define extraction rules for each trade type (e.g., `config_irs_vanilla.json`, `config_fx_option.json`).
+*   **Regex Pattern Library:** Modular regex patterns are applied to extract key fields:
+    *   **Price/Rate:** `Price:\s*(\d+\.?\d*)`
+    *   **Tenor:** `Tenor:\s*(\d+[YM])`
+    *   **Notional:** `Notional:\s*([A-Z]{3})\s*(\d+[MBK]?)`
+    *   **Dates:** `(Settlement|Trade|Effective)\s*Date:\s*(\d{2}[-/]\w{3}[-/]\d{4})`
+*   **Context-Aware Parsing:** logic handles variations like "5Y" vs "5 Years" or "USD 10m" vs "10,000,000 USD".
+
+## 4. TABLE DATA PARSING (Margins, Greeks, Risk)
+*   **Table Identification:** Detects table structures in email bodies (HTML `<table>` tags or text-based grid layouts).
+*   **Header Mapping:** dynamic mapping of column headers (e.g., "Initial Margin", "IM", "Required Margin") to standardized internal field names.
+*   **Row-Level Extraction:** Iterates through table rows to extract values for specific currencies or portfolios.
+    *   **Margin Data:** Extracts `Initial Margin`, `Variation Margin`, `Collateral Balance`, and `Haircuts`.
+    *   **Risk Metrics:** Extracts `MtM`, `Delta`, `Gamma`, `Vega` from valuation reports.
+*   **Data Type Casting:** Automatically converts string values (e.g., "(1,200.50)") to signed floats (-1200.50).
+
+## 5. VALIDATION & EXCEPTION HANDLING
+*   **Schema Validation:** Enforces data types and required fields (e.g., `Trade Date` must be a valid date, `Notional` must be > 0).
+*   **Business Logic Checks:** Validates extracted data against business rules (e.g., `Settlement Date` >= `Trade Date`).
+*   **Automated Flagging:** Records with validation errors or low extraction confidence are flagged with a specific error code.
+*   **Feedback Loop:** "Analyst corrections" on flagged items update the ground truth database, potentially triggering rule updates (Active Learning).
+
+## 6. STRUCTURED OUTPUT GENERATION
+*   **JSON Serialization:** Converts the extracted, validated data into a standardized JSON payload.
+*   **Downstream Routing:** Publishes the JSON payload to message queues (e.g., Kafka, MQ) or API endpoints for consumption by Risk, Operations, and Compliance systems.
