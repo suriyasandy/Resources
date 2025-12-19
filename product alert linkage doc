@@ -1,31 +1,40 @@
 import pandas as pd
 import numpy as np
 
-# ============================================================
-# ASSUMPTION:
-#   ird_df  -> IRD trades / alerts DataFrame
-#   cb_df   -> Cash Bonds trades / alerts DataFrame
-# ============================================================
+# =========================================================
+# ASSUMPTIONS
+# =========================================================
+# ird_df     -> IRD alerts / trades
+# cb_df      -> Cash Bond alerts / trades
+# curve_df   -> Daily curve data
+#
+# curve_df columns:
+#   business_date
+#   curve_name        (SOFR / SONIA / ESTER)
+#   tenor             (<=2yr, 2-10yr, >10yr)
+#   rate_value        (numeric)
+# =========================================================
 
 
-# =========================
+# =========================================================
 # 1. DATE NORMALISATION
-# =========================
+# =========================================================
 
-# ---- IRD ----
 ird_df['business_date'] = pd.to_datetime(ird_df['business_date'], errors='coerce')
 ird_df['start_date'] = pd.to_datetime(ird_df['start_date'], errors='coerce')
 ird_df['maturity_date'] = pd.to_datetime(ird_df['maturity_date'], errors='coerce')
 ird_df['trade_datetime'] = pd.to_datetime(ird_df['trade_datetime'], errors='coerce')
 
-# ---- CASH BONDS ----
 cb_df['business_date'] = pd.to_datetime(cb_df['as_at_date'], errors='coerce')
 cb_df['trade_datetime'] = pd.to_datetime(cb_df['trade_datetime'], errors='coerce')
 
+curve_df['business_date'] = pd.to_datetime(curve_df['business_date'], errors='coerce')
+curve_df['tenor'] = curve_df['tenor'].str.strip()
 
-# =========================
+
+# =========================================================
 # 2. IRD TENOR DERIVATION
-# =========================
+# =========================================================
 
 ird_df['tenor_years'] = np.where(
     (ird_df['start_date'].notna()) &
@@ -46,7 +55,6 @@ def bucket_tenor(years):
         return '>10yr'
 
 ird_df['tenor'] = ird_df['tenor_years'].apply(bucket_tenor)
-
 ird_df['tenor_source'] = np.where(
     ird_df['tenor'] == 'UNKNOWN',
     'MISSING_DATES',
@@ -54,9 +62,9 @@ ird_df['tenor_source'] = np.where(
 )
 
 
-# =========================
+# =========================================================
 # 3. CASH BOND TENOR CLEANUP
-# =========================
+# =========================================================
 
 cb_df['tenor'] = (
     cb_df['tenor']
@@ -71,11 +79,10 @@ cb_df['tenor'] = (
 )
 
 
-# =========================
+# =========================================================
 # 4. CANONICAL ALERT VIEWS
-# =========================
+# =========================================================
 
-# ---- IRD ----
 ird_alerts = ird_df[[
     'execution_key',
     'business_date',
@@ -98,7 +105,6 @@ ird_alerts.rename(columns={
 ird_alerts['product_type'] = 'IRD'
 
 
-# ---- CASH BONDS ----
 cb_alerts = cb_df[[
     'trade_ref',
     'business_date',
@@ -120,13 +126,9 @@ cb_alerts.rename(columns={
 cb_alerts['product_type'] = 'CASHBOND'
 
 
-# =========================
-# 5. LINKAGE LOGIC (MVP)
-# =========================
-# Hard rules:
-#   business_date
-#   currency
-#   tenor
+# =========================================================
+# 5. CB ↔ IRD LINK CANDIDATES (RATE RISK)
+# =========================================================
 
 link_candidates = cb_alerts.merge(
     ird_alerts,
@@ -136,9 +138,9 @@ link_candidates = cb_alerts.merge(
 )
 
 
-# =========================
-# 6. SOFT CONFIRMATION FLAGS
-# =========================
+# =========================================================
+# 6. SOFT CONFIRMATION SIGNALS
+# =========================================================
 
 link_candidates['same_book'] = (
     link_candidates['book_cb'] == link_candidates['book_ird']
@@ -155,15 +157,15 @@ link_candidates['time_diff_minutes'] = (
 )
 
 
-# =========================
+# =========================================================
 # 7. LINK CONFIDENCE SCORE
-# =========================
+# =========================================================
 
 link_candidates['link_score'] = (
-    1 +  # base score for hard match
+    1 +
     link_candidates['same_book'].astype(int) +
     link_candidates['same_trader'].astype(int) +
-    (link_candidates['time_diff_minutes'] <= 1440).astype(int)  # <= 1 day
+    (link_candidates['time_diff_minutes'] <= 1440).astype(int)
 )
 
 link_candidates['link_strength'] = np.where(
@@ -173,34 +175,99 @@ link_candidates['link_strength'] = np.where(
 )
 
 
-# =========================
-# 8. PoC METRICS / OUTPUT
-# =========================
+# =========================================================
+# 8. CURVE RATE MOVEMENT (ΔRate)
+# =========================================================
 
-# Coverage
+curve_df = curve_df.sort_values(
+    ['curve_name', 'tenor', 'business_date']
+)
+
+curve_df['prev_rate'] = curve_df.groupby(
+    ['curve_name', 'tenor']
+)['rate_value'].shift(1)
+
+curve_df['delta_rate_bps'] = (
+    (curve_df['rate_value'] - curve_df['prev_rate']) * 100
+)
+
+
+# =========================================================
+# 9. ATTACH RATE MOVEMENT TO LINKED PAIRS
+# =========================================================
+
+link_candidates['risk_curve'] = (
+    link_candidates['curve_source_ird']
+    .fillna(link_candidates['curve_source_cb'])
+)
+
+link_with_rate = link_candidates.merge(
+    curve_df[['business_date', 'curve_name', 'tenor', 'delta_rate_bps']],
+    left_on=['business_date', 'risk_curve', 'tenor'],
+    right_on=['business_date', 'curve_name', 'tenor'],
+    how='left'
+)
+
+
+# =========================================================
+# 10. PnL ALERT FLAGS
+# =========================================================
+
+link_with_rate['cb_pnl_alert'] = (
+    link_with_rate['alert_description_cb']
+    .str.contains('PNL', case=False, na=False)
+)
+
+link_with_rate['ird_pnl_alert'] = (
+    link_with_rate['alert_description_ird']
+    .str.contains('PNL', case=False, na=False)
+)
+
+
+# =========================================================
+# 11. RATE MOVE MATERIALITY
+# =========================================================
+
+RATE_MOVE_THRESHOLD = 2.0  # bps
+
+link_with_rate['rate_move_flag'] = (
+    link_with_rate['delta_rate_bps'].abs() >= RATE_MOVE_THRESHOLD
+)
+
+
+# =========================================================
+# 12. EARLY RATE STRESS SIGNAL (PoC ONLY)
+# =========================================================
+
+link_with_rate['rate_stress_signal'] = np.where(
+    (link_with_rate['ird_pnl_alert']) &
+    (~link_with_rate['cb_pnl_alert']) &
+    (link_with_rate['rate_move_flag']),
+    'Y',
+    'N'
+)
+
+
+# =========================================================
+# 13. PoC METRICS / RESULTS
+# =========================================================
+
 coverage = (
-    link_candidates['alert_id_cb'].nunique() /
+    link_with_rate['alert_id_cb'].nunique() /
     cb_alerts['alert_id'].nunique()
 )
 
-print(f'Bond alerts with IRD link candidates: {coverage:.2%}')
+print(f"\nCB alerts with IRD link candidates: {coverage:.2%}")
 
-# Tenor distribution
-print("\nLinkage by Tenor:")
-print(link_candidates['tenor'].value_counts())
+print("\nLink strength distribution:")
+print(link_with_rate['link_strength'].value_counts())
 
-# Time proximity
-print("\nTrade Time Difference (minutes):")
-print(link_candidates['time_diff_minutes'].describe())
+print("\nIRD vs CB PnL hit rates (rate move days):")
+rate_days = link_with_rate[link_with_rate['rate_move_flag']]
+print("IRD Hit Rate:", rate_days['ird_pnl_alert'].mean())
+print("CB  Hit Rate:", rate_days['cb_pnl_alert'].mean())
 
-# Legal Entity Insight
-print("\nSame vs Different Legal Entity:")
-print(
-    link_candidates.groupby(
-        link_candidates['legal_entity_cb'] ==
-        link_candidates['legal_entity_ird']
-    ).size()
-)
+print("\nEarly rate stress signals:")
+print(link_with_rate['rate_stress_signal'].value_counts())
 
-# Preview
-link_candidates.head()
+link_with_rate.head()
