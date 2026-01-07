@@ -1,0 +1,65 @@
+import pandas as pd
+import numpy as np
+
+df = df1.copy()
+
+df['trade_time'] = pd.to_datetime(df['omrctradetradedatetime'])
+df['trade_minute'] = df['trade_time'].dt.hour*60 + df['trade_time'].dt.minute
+
+# numeric extract (with safe conversion)
+for col in [
+    'omrctradeBuivalue','omrctradeRdamthreshold',
+    'omrctradeOrigthresholdpercent']:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+df['notional'] = pd.to_numeric(df['omrctradeNotionalreportingccy'], errors='coerce')
+df['notional_log'] = np.log1p(df['notional'])
+features = [
+    'omrctradeTreatscpty',      # Counterparty/client
+    'omrctradeInstrument',      # IRS, Swap, Forward etc
+    'omrctradeProdtype',        # IRD / FX / etc
+    'omrctradeProductsbtype',   # OIS / XCCY / NDF / IRS
+    'omrctradeBookname',
+    'trade_minute',
+    'notional_log',
+    'omrctradeRdamthreshold',
+    'omrctradeOrigthresholdpercent'
+]
+X = df[features]
+
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.cluster import DBSCAN
+
+cat_cols = ['omrctradeTreatscpty','omrctradeInstrument','omrctradeProdtype',
+            'omrctradeProductsbtype','omrctradeBookname']
+num_cols = ['trade_minute','notional_log','omrctradeRdamthreshold',
+            'omrctradeOrigthresholdpercent']
+
+prep = ColumnTransformer([
+    ('cat', OneHotEncoder(handle_unknown='ignore'), cat_cols),
+    ('num', StandardScaler(), num_cols)
+])
+
+model = DBSCAN(eps=0.55, min_samples=3)
+
+pipe = Pipeline([
+    ('prep', prep),
+    ('cluster', model)
+])
+
+df['cluster_id'] = pipe.fit_predict(X)
+df['cluster_id'] = df['cluster_id'].replace(-1, None)
+
+date = df.trade_time.dt.date.mode()[0]
+df['package_id'] = df['cluster_id'].apply(
+    lambda x: f"PKG_{date}_{int(x):03}" if pd.notnull(x) else None
+)
+df.groupby('package_id')\
+  .agg(count=('exceptionId','count'),
+       counterparties=('omrctradeTreatscpty','nunique'),
+       products=('omrctradeProdtype','nunique'),
+       instruments=('omrctradeInstrument','nunique'),
+       min_time=('trade_time','min'),
+       max_time=('trade_time','max'))                                     
