@@ -1,4 +1,5 @@
 import pandas as pd
+from math import fabs
 
 # -------------------------------
 # 1. LOAD DATA
@@ -12,25 +13,24 @@ ird = pd.read_csv("ird_alerts.csv")
 # -------------------------------
 
 # Standardize timestamps
-gfx['time'] = pd.to_datetime(gfx['omrctradetradedatetime'])
-ird['time'] = pd.to_datetime(ird['omrctradetradedatetime'])
+gfx['time'] = pd.to_datetime(gfx['omrctradetradedatetime'], errors='coerce')
+ird['time'] = pd.to_datetime(ird['omrctradetradedatetime'], errors='coerce')
 
-# Extract FX legs (Example instrument: EUR/USD, USD/JPY)
+# Extract FX base/quote from pair e.g. USD/JPY
 gfx['fx_base']  = gfx['omrctradeInstrument'].str[:3]
 gfx['fx_quote'] = gfx['omrctradeInstrument'].str[-3:]
 
-# Standardize IRD currencies
+# Standardize IRD currency fields
 ird['ccy_notional'] = ird['notional_ccy']
 ird['ccy_base']     = ird['base_ccy']
 ird['ccy_pnl']      = ird['pnl_ccy']
 
-# Ensure numeric notional comparison works
+# Numeric notional conversion
 gfx['gfx_notional'] = pd.to_numeric(gfx['omrctradeNotionalreportingccy'], errors='coerce')
 ird['ird_notional'] = pd.to_numeric(ird['omrctradeNotionalreportingccy'], errors='coerce')
 
 # -------------------------------
 # 3. BUILD SURROGATE JOIN KEY
-#    (Legal Entity + Book name)
 # -------------------------------
 
 gfx['link_key'] = (
@@ -44,7 +44,7 @@ ird['link_key'] = (
 )
 
 # -------------------------------
-# 4. INITIAL INNER MERGE
+# 4. INITIAL INNER MERGE (NO CP JOIN)
 # -------------------------------
 
 cand = gfx.merge(
@@ -52,65 +52,73 @@ cand = gfx.merge(
 )
 
 # -------------------------------
-# 5. FILTER 1: TIME WINDOW
-#    (Same trade idea: +/- 20 minutes)
+# 5. CALCULATE LINK SCORE (SOFT RULES)
 # -------------------------------
 
-cand = cand[
-    abs(cand['time_gfx'] - cand['time_ird']) <= pd.Timedelta(minutes=20)
-]
-
-# -------------------------------
-# 6. FILTER 2: CURRENCY OVERLAP
-#    (ANY IRD CCY must appear in FX pair)
-# -------------------------------
-
-def ccymatch(row):
+def calc_link_score(row):
+    score = 0
+    
+    # 1. Currency overlap (must exist)
     fx_set = {row['fx_base_gfx'], row['fx_quote_gfx']}
     ird_set = {row['ccy_notional_ird'], row['ccy_base_ird'], row['ccy_pnl_ird']}
-    return len(fx_set.intersection(ird_set)) > 0
+    if len(fx_set.intersection(ird_set)) == 0:
+        return 0  # Reject
+    score += 1  # Strong match
 
-cand['ccy_match'] = cand.apply(ccymatch, axis=1)
-cand = cand[cand['ccy_match'] == True]
+    # 2. Book/Legal Entity already matched by merge
+    score += 1
+
+    # 3. Notional similarity
+    g = row['gfx_notional']
+    i = row['ird_notional']
+    if g > 0 and i > 0:
+        ratio = fabs(g - i) / g
+        if ratio <= 0.5:
+            score += 1
+        elif ratio <= 1.0:
+            score += 0.5
+
+    # 4. Time score (soft)
+    if pd.notna(row['time_gfx']) and pd.notna(row['time_ird']):
+        td = fabs((row['time_gfx'] - row['time_ird']).total_seconds()) / 60
+        if td <= 30:
+            score += 1
+        elif td <= 24*60:
+            score += 0.5
+        elif td <= 48*60:
+            score += 0.25
+
+    return score
+
+cand['link_score'] = cand.apply(calc_link_score, axis=1)
 
 # -------------------------------
-# 7. FILTER 3: NOTIONAL TOLERANCE
-#    (Rough economic sizing check)
+# 6. KEEP STRONG MATCHES
 # -------------------------------
 
-cand = cand[
-    abs(cand['gfx_notional'] - cand['ird_notional'])
-    <= 0.5 * cand['gfx_notional']
-]
+# Threshold for linked trades
+linked_df = cand[cand['link_score'] >= 2.5].copy()
 
 # -------------------------------
-# 8. FINAL CONSOLIDATED OUTPUT
-# -------------------------------
-
-linked_cols = [
-    'exceptionId_gfx','fx_base_gfx','fx_quote_gfx','gfx_notional','time_gfx',
-    'exceptionId_ird','ccy_notional_ird','ird_notional','time_ird',
-    'omrctradeLegalentity_gfx','omrctradeBookname_gfx'
-]
-
-linked_df = cand[linked_cols].reset_index(drop=True)
-
-# -------------------------------
-# 9. GET UNLINKED ALERTS
+# 7. GET UNLINKED ALERTS
 # -------------------------------
 
 gfx_unlinked = gfx[~gfx['exceptionId'].isin(linked_df['exceptionId_gfx'])]
 ird_unlinked = ird[~ird['exceptionId'].isin(linked_df['exceptionId_ird'])]
 
 # -------------------------------
-# 10. SAVE OUTPUT FILES
+# 8. EXPORT RESULTS
 # -------------------------------
 
-linked_df.to_csv("linked_gfx_ird_alerts.csv", index=False)
+linked_df.to_csv("linked_gfx_ird_alerts_scored.csv", index=False)
 gfx_unlinked.to_csv("gfx_unlinked_alerts.csv", index=False)
 ird_unlinked.to_csv("ird_unlinked_alerts.csv", index=False)
 
-print("DONE!")
-print(f"Linked Alerts Found: {len(linked_df)}")
-print(f"GFX standalone alerts: {len(gfx_unlinked)}")
-print(f"IRD standalone alerts: {len(ird_unlinked)}")
+print("\n===== CROSS-ASSET LINKING COMPLETE =====")
+print(f"Likely Linked Alerts:  {len(linked_df)}")
+print(f"GFX Standalone Alerts: {len(gfx_unlinked)}")
+print(f"IRD Standalone Alerts: {len(ird_unlinked)}")
+print("Files written:")
+print(" linked_gfx_ird_alerts_scored.csv")
+print(" gfx_unlinked_alerts.csv")
+print(" ird_unlinked_alerts.csv")
