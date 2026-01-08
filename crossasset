@@ -1,74 +1,81 @@
 import pandas as pd
 from math import fabs
 
-# -------------------------------
-# 1. LOAD DATA
-# -------------------------------
+# ---------------------------------------
+# 1. LOAD INPUT FILES
+# ---------------------------------------
 
 gfx = pd.read_csv("gfx_alerts.csv")
 ird = pd.read_csv("ird_alerts.csv")
 
-# -------------------------------
-# 2. BASIC CLEANUP / PREP
-# -------------------------------
+# ---------------------------------------
+# 2. STANDARD PREP & CLEANUP
+# ---------------------------------------
 
-# Standardize timestamps
+# Standardize timestamps (not used for linking anymore, but useful context)
 gfx['time'] = pd.to_datetime(gfx['omrctradetradedatetime'], errors='coerce')
 ird['time'] = pd.to_datetime(ird['omrctradetradedatetime'], errors='coerce')
 
-# Extract FX base/quote from pair e.g. USD/JPY
+# Extract CCY legs from GFX pair (E.g. EUR/USD)
 gfx['fx_base']  = gfx['omrctradeInstrument'].str[:3]
 gfx['fx_quote'] = gfx['omrctradeInstrument'].str[-3:]
 
-# Standardize IRD currency fields
+# IRD currency exposure fields
 ird['ccy_notional'] = ird['notional_ccy']
 ird['ccy_base']     = ird['base_ccy']
 ird['ccy_pnl']      = ird['pnl_ccy']
 
-# Numeric notional conversion
+# Ensure numeric notional for comparison
 gfx['gfx_notional'] = pd.to_numeric(gfx['omrctradeNotionalreportingccy'], errors='coerce')
 ird['ird_notional'] = pd.to_numeric(ird['omrctradeNotionalreportingccy'], errors='coerce')
 
-# -------------------------------
-# 3. BUILD SURROGATE JOIN KEY
-# -------------------------------
+# ---------------------------------------
+# 3. MATURITY DATE EXTRACTION
+# ---------------------------------------
 
-gfx['link_key'] = (
-    gfx['omrctradeLegalentity'].astype(str) + '_' +
-    gfx['omrctradeBookname'].astype(str)
+# GFX maturity/settlement
+gfx['mat'] = pd.to_datetime(
+    gfx['omrctradeMaturityDate'].fillna(gfx['omrctradeSettlDate']),
+    errors='coerce'
 )
 
-ird['link_key'] = (
-    ird['omrctradeLegalentity'].astype(str) + '_' +
-    ird['omrctradeBookname'].astype(str)
+# IRD maturity/termination
+ird['mat'] = pd.to_datetime(
+    ird['maturity_date'].fillna(ird['terminationDate']),
+    errors='coerce'
 )
 
-# -------------------------------
-# 4. INITIAL INNER MERGE (NO CP JOIN)
-# -------------------------------
+# Tenor bucket (year-month period)
+gfx['mat_ym'] = gfx['mat'].dt.to_period('M')
+ird['mat_ym'] = ird['mat'].dt.to_period('M')
 
-cand = gfx.merge(
-    ird, how='inner', on='link_key', suffixes=('_gfx','_ird')
-)
+# ---------------------------------------
+# 4. MERGE ON LEGAL ENTITY (NOT BOOK)
+# ---------------------------------------
 
-# -------------------------------
-# 5. CALCULATE LINK SCORE (SOFT RULES)
-# -------------------------------
+gfx['link_key'] = gfx['omrctradeLegalentity'].astype(str)
+ird['link_key'] = ird['omrctradeLegalentity'].astype(str)
+
+cand = gfx.merge(ird, how='inner', on='link_key', suffixes=('_gfx','_ird'))
+
+# ---------------------------------------
+# 5. SCORING FUNCTION (NO TIME SCORE)
+# ---------------------------------------
 
 def calc_link_score(row):
     score = 0
     
-    # 1. Currency overlap (must exist)
+    # 1. CURRENCY OVERLAP (MUST HAVE)
     fx_set = {row['fx_base_gfx'], row['fx_quote_gfx']}
     ird_set = {row['ccy_notional_ird'], row['ccy_base_ird'], row['ccy_pnl_ird']}
     if len(fx_set.intersection(ird_set)) == 0:
-        return 0  # Reject
-    score += 1  # Strong match
-
-    # 2. Book/Legal Entity already matched by merge
+        return 0
+    score += 1   # currency match
+    
+    # 2. LEGAL ENTITY matched already → +1
     score += 1
-
-    # 3. Notional similarity
+    
+    # 3. NOTIONAL SIMILARITY
     g = row['gfx_notional']
     i = row['ird_notional']
     if g > 0 and i > 0:
@@ -78,47 +85,49 @@ def calc_link_score(row):
         elif ratio <= 1.0:
             score += 0.5
 
-    # 4. Time score (soft)
-    if pd.notna(row['time_gfx']) and pd.notna(row['time_ird']):
-        td = fabs((row['time_gfx'] - row['time_ird']).total_seconds()) / 60
-        if td <= 30:
-            score += 1
-        elif td <= 24*60:
-            score += 0.5
-        elif td <= 48*60:
-            score += 0.25
+    # 4. MATURITY ALIGNMENT (STRONG SIGNAL)
+    if pd.notna(row['mat_gfx']) and pd.notna(row['mat_ird']):
+        if row['mat_gfx'] == row['mat_ird']:
+            score += 1.25  # perfect same-day maturity
+        elif row['mat_ym_gfx'] == row['mat_ym_ird']:
+            score += 1.0   # same maturity month/tenor
+        else:
+            # Allow hedge rolls ±1 month
+            month_diff = abs((row['mat_ym_gfx'] - row['mat_ym_ird']).n)
+            if month_diff == 1:
+                score += 0.5
 
     return score
 
 cand['link_score'] = cand.apply(calc_link_score, axis=1)
 
-# -------------------------------
-# 6. KEEP STRONG MATCHES
-# -------------------------------
+# ---------------------------------------
+# 6. SELECT LIKELY MATCHES
+# ---------------------------------------
 
-# Threshold for linked trades
+# Recommend threshold 2.5 or higher
 linked_df = cand[cand['link_score'] >= 2.5].copy()
 
-# -------------------------------
-# 7. GET UNLINKED ALERTS
-# -------------------------------
+# ---------------------------------------
+# 7. UNLINKED ITEMS
+# ---------------------------------------
 
 gfx_unlinked = gfx[~gfx['exceptionId'].isin(linked_df['exceptionId_gfx'])]
 ird_unlinked = ird[~ird['exceptionId'].isin(linked_df['exceptionId_ird'])]
 
-# -------------------------------
-# 8. EXPORT RESULTS
-# -------------------------------
+# ---------------------------------------
+# 8. SAVE OUTPUT
+# ---------------------------------------
 
-linked_df.to_csv("linked_gfx_ird_alerts_scored.csv", index=False)
+linked_df.to_csv("linked_gfx_ird_maturity_scored.csv", index=False)
 gfx_unlinked.to_csv("gfx_unlinked_alerts.csv", index=False)
 ird_unlinked.to_csv("ird_unlinked_alerts.csv", index=False)
 
-print("\n===== CROSS-ASSET LINKING COMPLETE =====")
-print(f"Likely Linked Alerts:  {len(linked_df)}")
-print(f"GFX Standalone Alerts: {len(gfx_unlinked)}")
-print(f"IRD Standalone Alerts: {len(ird_unlinked)}")
-print("Files written:")
-print(" linked_gfx_ird_alerts_scored.csv")
+print("\n==== MATURITY-BASED CROSS-ASSET MATCHING DONE ====")
+print(f"Linked Alerts:       {len(linked_df)}")
+print(f"GFX Standalone:      {len(gfx_unlinked)}")
+print(f"IRD Standalone:      {len(ird_unlinked)}")
+print("Results saved:")
+print(" linked_gfx_ird_maturity_scored.csv")
 print(" gfx_unlinked_alerts.csv")
 print(" ird_unlinked_alerts.csv")
