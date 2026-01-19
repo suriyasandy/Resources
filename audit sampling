@@ -243,12 +243,12 @@ class AuditSamplingApp:
         self.strata_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar_tree.config(command=self.strata_tree.yview)
         
-        self.strata_tree.column("#0", width=120, heading="Region-Product")
-        self.strata_tree.column("Population", width=90, heading="Pop Size")
-        self.strata_tree.column("Value", width=90, heading="Value")
-        self.strata_tree.column("Threshold", width=90, heading="Threshold")
-        self.strata_tree.column("Risk", width=70, heading="Risk")
-        self.strata_tree.column("Sample Size", width=80, heading="Sample Sz")
+        self.strata_tree.column("#0", width=120)
+        self.strata_tree.column("Population", width=90)
+        self.strata_tree.column("Value", width=90)
+        self.strata_tree.column("Threshold", width=90)
+        self.strata_tree.column("Risk", width=70)
+        self.strata_tree.column("Sample Size", width=80)
         
         self.strata_tree.heading("#0", text="Region-Product")
         self.strata_tree.heading("Population", text="Pop Size")
@@ -284,10 +284,10 @@ class AuditSamplingApp:
         self.sample_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar_sample.config(command=self.sample_tree.yview)
         
-        self.sample_tree.column("#0", width=50, heading="ID")
-        self.sample_tree.column("Region", width=80, heading="Region")
-        self.sample_tree.column("Product", width=80, heading="Product")
-        self.sample_tree.column("Count", width=60, heading="Count")
+        self.sample_tree.column("#0", width=50)
+        self.sample_tree.column("Region", width=80)
+        self.sample_tree.column("Product", width=80)
+        self.sample_tree.column("Count", width=60)
         
         self.sample_tree.heading("#0", text="Sample ID")
         self.sample_tree.heading("Region", text="Region")
