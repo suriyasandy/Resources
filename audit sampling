@@ -1,0 +1,556 @@
+"""
+Audit Sampling Tool - Stratified Sampling with Industry-Approved Methods
+Specialized for Region-Product-based audit sampling with risk-based allocation
+"""
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import pandas as pd
+import numpy as np
+from math import sqrt, ceil
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+import os
+from datetime import datetime
+
+@dataclass
+class StratumConfig:
+    """Configuration for each stratum (Region-Product combination)"""
+    stratum_id: str
+    region: str
+    product: str
+    population_size: int
+    population_value: float
+    threshold: float
+    risk_level: str  # HIGH, MEDIUM, LOW
+    
+
+class SamplingCalculator:
+    """
+    Industry-approved statistical sampling methods for audit
+    Based on OMRC Enhanced Sampling Methodology
+    """
+    
+    @staticmethod
+    def calculate_sample_size_mus(population_value: float, threshold: float, 
+                                   confidence_level: float = 0.95, 
+                                   risk_level: str = 'MEDIUM') -> int:
+        """
+        Monetary Unit Sampling (MUS) / Stratified Monetary Sampling
+        Industry standard for financial audit
+        
+        Args:
+            population_value: Total value of population
+            threshold: Tolerable error/threshold
+            confidence_level: Confidence level (0.90, 0.95, 0.99)
+            risk_level: HIGH, MEDIUM, LOW
+        
+        Returns:
+            Sample size
+        """
+        # Z-score for confidence levels
+        z_scores = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}
+        z = z_scores.get(confidence_level, 1.96)
+        
+        # Risk adjustment factors
+        risk_factors = {'HIGH': 1.5, 'MEDIUM': 1.0, 'LOW': 0.7}
+        risk_factor = risk_factors.get(risk_level, 1.0)
+        
+        # MUS formula: n = (Z² × Population Value × Risk Factor) / (Threshold²)
+        if threshold <= 0:
+            return 30  # Minimum sample size
+        
+        sample_size = (z**2 * population_value * risk_factor) / (threshold**2)
+        return max(ceil(sample_size), 5)  # Minimum 5 per stratum
+    
+    @staticmethod
+    def calculate_sample_size_attribute(population_size: int,
+                                       expected_error_rate: float = 0.05,
+                                       confidence_level: float = 0.95,
+                                       tolerable_rate: float = 0.10,
+                                       risk_level: str = 'MEDIUM') -> int:
+        """
+        Attribute Sampling / Classical Sampling
+        For compliance/operational testing
+        
+        Args:
+            population_size: Number of items in population
+            expected_error_rate: Expected error rate (0-1)
+            confidence_level: Confidence level (0.90, 0.95, 0.99)
+            tolerable_rate: Tolerable error rate (0-1)
+            risk_level: HIGH, MEDIUM, LOW
+        
+        Returns:
+            Sample size
+        """
+        # AICPA standard tables - simplified implementation
+        # Table based on confidence level and tolerable rate
+        
+        risk_factors = {'HIGH': 1.4, 'MEDIUM': 1.0, 'LOW': 0.7}
+        risk_factor = risk_factors.get(risk_level, 1.0)
+        
+        # Attribute sampling formula (simplified)
+        if tolerable_rate <= expected_error_rate:
+            return 30  # Cannot achieve
+        
+        # Sample size formula
+        z_scores = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}
+        z = z_scores.get(confidence_level, 1.96)
+        
+        # Attribute formula: n = Z² × p(1-p) / (tolerable_rate - expected_rate)²
+        p = expected_error_rate
+        numerator = z**2 * p * (1 - p) * risk_factor
+        denominator = (tolerable_rate - expected_error_rate)**2
+        
+        sample_size = ceil(numerator / denominator)
+        return max(sample_size, 5)  # Minimum 5
+    
+    @staticmethod
+    def calculate_sample_size_stratified_mean(population_size: int,
+                                             population_std_dev: float,
+                                             error_margin: float,
+                                             confidence_level: float = 0.95,
+                                             risk_level: str = 'MEDIUM') -> int:
+        """
+        Stratified Mean Per Unit Sampling (MPU)
+        For monetary populations where value matters
+        
+        Args:
+            population_size: Number of items
+            population_std_dev: Standard deviation of values
+            error_margin: Acceptable error margin
+            confidence_level: Confidence level
+            risk_level: Risk level
+        
+        Returns:
+            Sample size
+        """
+        risk_factors = {'HIGH': 1.5, 'MEDIUM': 1.0, 'LOW': 0.7}
+        risk_factor = risk_factors.get(risk_level, 1.0)
+        
+        z_scores = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}
+        z = z_scores.get(confidence_level, 1.96)
+        
+        if error_margin <= 0 or population_std_dev <= 0:
+            return 30
+        
+        # MPU formula: n = (Z × σ × Risk Factor / Error Margin)²
+        sample_size = ((z * population_std_dev * risk_factor) / error_margin) ** 2
+        return max(ceil(sample_size), 5)
+
+
+class AuditSamplingApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Audit Sampling Tool - Stratified Sampling")
+        self.root.geometry("1400x800")
+        
+        # Data storage
+        self.data = None
+        self.strata = {}
+        self.sample_result = None
+        self.calculator = SamplingCalculator()
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup the UI layout"""
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Configure grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=1)
+        
+        # ===== LEFT PANEL: Input Data =====
+        left_frame = ttk.LabelFrame(main_frame, text="Input Data & Configuration", padding="10")
+        left_frame.grid(row=0, column=0, rowspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5)
+        
+        # File upload
+        ttk.Button(left_frame, text="Load CSV File", 
+                  command=self.load_file).pack(fill=tk.X, pady=5)
+        
+        self.file_label = ttk.Label(left_frame, text="No file loaded", foreground="gray")
+        self.file_label.pack(fill=tk.X)
+        
+        # Data preview
+        ttk.Label(left_frame, text="Data Preview:", font=("Arial", 10, "bold")).pack(fill=tk.X, pady=(10, 5))
+        
+        preview_frame = ttk.Frame(left_frame)
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        scrollbar = ttk.Scrollbar(preview_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.preview_text = tk.Text(preview_frame, height=10, width=40, yscrollcommand=scrollbar.set)
+        self.preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.preview_text.yview)
+        
+        # Configuration section
+        ttk.Label(left_frame, text="Sampling Configuration:", font=("Arial", 10, "bold")).pack(fill=tk.X, pady=(10, 5))
+        
+        config_frame = ttk.Frame(left_frame)
+        config_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(config_frame, text="Method:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.method_var = tk.StringVar(value="MUS")
+        method_combo = ttk.Combobox(config_frame, textvariable=self.method_var,
+                                     values=["MUS", "Attribute", "MPU"], state="readonly")
+        method_combo.grid(row=0, column=1, sticky=tk.EW, padx=5)
+        
+        ttk.Label(config_frame, text="Confidence:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        self.conf_var = tk.StringVar(value="0.95")
+        conf_combo = ttk.Combobox(config_frame, textvariable=self.conf_var,
+                                   values=["0.90", "0.95", "0.99"], state="readonly")
+        conf_combo.grid(row=1, column=1, sticky=tk.EW, padx=5)
+        
+        ttk.Label(config_frame, text="Total Sample Size:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        self.total_sample_var = tk.StringVar(value="100")
+        ttk.Entry(config_frame, textvariable=self.total_sample_var, width=15).grid(row=2, column=1, sticky=tk.W, padx=5)
+        
+        config_frame.columnconfigure(1, weight=1)
+        
+        # Calculate button
+        ttk.Button(left_frame, text="Calculate Sample Size", 
+                  command=self.calculate_sample_size).pack(fill=tk.X, pady=10)
+        
+        ttk.Button(left_frame, text="Select Samples", 
+                  command=self.select_samples).pack(fill=tk.X, pady=5)
+        
+        ttk.Button(left_frame, text="Export Results", 
+                  command=self.export_results).pack(fill=tk.X, pady=5)
+        
+        # ===== MIDDLE PANEL: Strata Details =====
+        middle_frame = ttk.LabelFrame(main_frame, text="Strata Configuration & Sample Size Calculation", padding="10")
+        middle_frame.grid(row=0, column=1, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5)
+        middle_frame.columnconfigure(0, weight=1)
+        middle_frame.rowconfigure(1, weight=1)
+        
+        # Strata tree
+        tree_frame = ttk.Frame(middle_frame)
+        tree_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+        
+        scrollbar_tree = ttk.Scrollbar(tree_frame)
+        scrollbar_tree.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.strata_tree = ttk.Treeview(tree_frame, columns=("Population", "Value", "Threshold", "Risk", "Sample Size"),
+                                        height=15, yscrollcommand=scrollbar_tree.set)
+        self.strata_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar_tree.config(command=self.strata_tree.yview)
+        
+        self.strata_tree.column("#0", width=120, heading="Region-Product")
+        self.strata_tree.column("Population", width=90, heading="Pop Size")
+        self.strata_tree.column("Value", width=90, heading="Value")
+        self.strata_tree.column("Threshold", width=90, heading="Threshold")
+        self.strata_tree.column("Risk", width=70, heading="Risk")
+        self.strata_tree.column("Sample Size", width=80, heading="Sample Sz")
+        
+        self.strata_tree.heading("#0", text="Region-Product")
+        self.strata_tree.heading("Population", text="Pop Size")
+        self.strata_tree.heading("Value", text="Value")
+        self.strata_tree.heading("Threshold", text="Threshold")
+        self.strata_tree.heading("Risk", text="Risk Level")
+        self.strata_tree.heading("Sample Size", text="Sample Sz")
+        
+        # ===== RIGHT PANEL: Sample Result =====
+        right_frame = ttk.LabelFrame(main_frame, text="Sample Result", padding="10")
+        right_frame.grid(row=2, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5)
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(1, weight=1)
+        
+        # Summary stats
+        stats_frame = ttk.Frame(right_frame)
+        stats_frame.grid(row=0, column=0, sticky=tk.EW, pady=5)
+        
+        self.stats_label = ttk.Label(stats_frame, text="Ready to calculate samples...", justify=tk.LEFT)
+        self.stats_label.pack(fill=tk.X)
+        
+        # Sample tree
+        sample_frame = ttk.Frame(right_frame)
+        sample_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        sample_frame.columnconfigure(0, weight=1)
+        sample_frame.rowconfigure(0, weight=1)
+        
+        scrollbar_sample = ttk.Scrollbar(sample_frame)
+        scrollbar_sample.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.sample_tree = ttk.Treeview(sample_frame, columns=("Region", "Product", "Count"),
+                                        height=15, yscrollcommand=scrollbar_sample.set)
+        self.sample_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar_sample.config(command=self.sample_tree.yview)
+        
+        self.sample_tree.column("#0", width=50, heading="ID")
+        self.sample_tree.column("Region", width=80, heading="Region")
+        self.sample_tree.column("Product", width=80, heading="Product")
+        self.sample_tree.column("Count", width=60, heading="Count")
+        
+        self.sample_tree.heading("#0", text="Sample ID")
+        self.sample_tree.heading("Region", text="Region")
+        self.sample_tree.heading("Product", text="Product")
+        self.sample_tree.heading("Count", text="Count")
+    
+    def load_file(self):
+        """Load CSV file"""
+        file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx")])
+        if not file_path:
+            return
+        
+        try:
+            if file_path.endswith('.csv'):
+                self.data = pd.read_csv(file_path)
+            else:
+                self.data = pd.read_excel(file_path)
+            
+            # Validate mandatory columns
+            if 'region' not in self.data.columns or 'product' not in self.data.columns:
+                messagebox.showerror("Error", "CSV must contain 'region' and 'product' columns")
+                return
+            
+            self.file_label.config(text=f"Loaded: {os.path.basename(file_path)} ({len(self.data)} rows)")
+            
+            # Show preview
+            preview = self.data.head(10).to_string()
+            self.preview_text.config(state=tk.NORMAL)
+            self.preview_text.delete(1.0, tk.END)
+            self.preview_text.insert(tk.END, preview)
+            self.preview_text.config(state=tk.DISABLED)
+            
+            self.build_strata()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load file: {str(e)}")
+    
+    def build_strata(self):
+        """Build strata from data"""
+        if self.data is None:
+            return
+        
+        self.strata.clear()
+        
+        # Group by region-product
+        for (region, product), group in self.data.groupby(['region', 'product']):
+            stratum_id = f"{region}-{product}"
+            
+            # Calculate statistics
+            pop_size = len(group)
+            pop_value = group.get('value', pd.Series([0] * len(group))).sum() if 'value' in self.data.columns else pop_size
+            
+            # Get threshold if available
+            threshold = group.get('threshold', pd.Series([1000] * len(group))).iloc[0] if 'threshold' in self.data.columns else 1000
+            
+            # Risk level
+            risk = group.get('risk_level', pd.Series(['MEDIUM'] * len(group))).iloc[0] if 'risk_level' in self.data.columns else 'MEDIUM'
+            
+            self.strata[stratum_id] = StratumConfig(
+                stratum_id=stratum_id,
+                region=region,
+                product=product,
+                population_size=pop_size,
+                population_value=pop_value,
+                threshold=threshold,
+                risk_level=risk
+            )
+        
+        self.display_strata()
+    
+    def display_strata(self):
+        """Display strata in tree"""
+        # Clear existing items
+        for item in self.strata_tree.get_children():
+            self.strata_tree.delete(item)
+        
+        # Add strata
+        for stratum_id, config in self.strata.items():
+            self.strata_tree.insert("", "end", text=stratum_id,
+                                   values=(config.population_size, f"{config.population_value:.0f}",
+                                          f"{config.threshold:.0f}", config.risk_level, "-"))
+    
+    def calculate_sample_size(self):
+        """Calculate sample size for each stratum"""
+        if not self.strata:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+        
+        method = self.method_var.get()
+        confidence = float(self.conf_var.get())
+        
+        # Calculate for each stratum
+        for stratum_id, config in self.strata.items():
+            if method == "MUS":
+                sample_size = self.calculator.calculate_sample_size_mus(
+                    population_value=config.population_value,
+                    threshold=config.threshold,
+                    confidence_level=confidence,
+                    risk_level=config.risk_level
+                )
+            elif method == "Attribute":
+                sample_size = self.calculator.calculate_sample_size_attribute(
+                    population_size=config.population_size,
+                    confidence_level=confidence,
+                    risk_level=config.risk_level
+                )
+            else:  # MPU
+                # Estimate std dev from population
+                group = self.data[(self.data['region'] == config.region) & (self.data['product'] == config.product)]
+                std_dev = group.get('value', pd.Series([config.population_value/config.population_size]*len(group))).std() if 'value' in self.data.columns else config.population_value / config.population_size
+                
+                sample_size = self.calculator.calculate_sample_size_stratified_mean(
+                    population_size=config.population_size,
+                    population_std_dev=std_dev,
+                    error_margin=config.threshold * 0.05,
+                    confidence_level=confidence,
+                    risk_level=config.risk_level
+                )
+            
+            # Store in strata for proportional allocation
+            config.calculated_sample_size = sample_size
+        
+        self.refresh_strata_display()
+        messagebox.showinfo("Success", "Sample sizes calculated for all strata")
+    
+    def refresh_strata_display(self):
+        """Refresh strata display with calculated sample sizes"""
+        for item in self.strata_tree.get_children():
+            self.strata_tree.delete(item)
+        
+        for stratum_id, config in self.strata.items():
+            sample_sz = getattr(config, 'calculated_sample_size', '-')
+            self.strata_tree.insert("", "end", text=stratum_id,
+                                   values=(config.population_size, f"{config.population_value:.0f}",
+                                          f"{config.threshold:.0f}", config.risk_level, sample_sz))
+    
+    def select_samples(self):
+        """Select samples using stratified sampling"""
+        if not self.strata:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+        
+        if not hasattr(list(self.strata.values())[0], 'calculated_sample_size'):
+            messagebox.showwarning("Warning", "Please calculate sample sizes first")
+            return
+        
+        total_sample_size = int(self.total_sample_var.get())
+        
+        # Allocate: 1 from each stratum first, then proportional allocation
+        allocation = {}
+        
+        # Mandatory: 1 sample per stratum
+        samples_per_stratum = 1
+        allocated_samples = len(self.strata)
+        
+        # Remaining samples to allocate proportionally
+        remaining = total_sample_size - allocated_samples
+        
+        # Proportional allocation based on population size
+        total_pop = sum(config.population_size for config in self.strata.values())
+        
+        for stratum_id, config in self.strata.items():
+            # 1 mandatory sample
+            allocation[stratum_id] = 1
+            
+            # Proportional allocation of remaining
+            if remaining > 0:
+                prop = config.population_size / total_pop
+                additional = int(ceil(prop * remaining))
+                allocation[stratum_id] += additional
+        
+        # Adjust to match total
+        total_allocated = sum(allocation.values())
+        if total_allocated > total_sample_size:
+            # Reduce largest allocations
+            diff = total_allocated - total_sample_size
+            for stratum_id in sorted(allocation.keys(), key=lambda x: allocation[x], reverse=True):
+                if diff <= 0:
+                    break
+                reduction = min(allocation[stratum_id] - 1, diff)
+                allocation[stratum_id] -= reduction
+                diff -= reduction
+        
+        # Select samples from data
+        self.sample_result = []
+        
+        for stratum_id, sample_count in allocation.items():
+            config = self.strata[stratum_id]
+            
+            # Get stratum data
+            group = self.data[(self.data['region'] == config.region) & (self.data['product'] == config.product)]
+            
+            # Random sampling within stratum
+            samples = group.sample(n=min(sample_count, len(group)), random_state=42)
+            
+            for idx, row in samples.iterrows():
+                self.sample_result.append({
+                    'region': config.region,
+                    'product': config.product,
+                    'stratum_id': stratum_id,
+                    'record': row.to_dict()
+                })
+        
+        self.display_samples(allocation)
+    
+    def display_samples(self, allocation):
+        """Display sample results"""
+        # Clear tree
+        for item in self.sample_tree.get_children():
+            self.sample_tree.delete(item)
+        
+        # Add samples by stratum
+        sample_count = 0
+        for stratum_id in sorted(allocation.keys()):
+            samples_in_stratum = [s for s in self.sample_result if s['stratum_id'] == stratum_id]
+            config = self.strata[stratum_id]
+            
+            for i, sample in enumerate(samples_in_stratum, 1):
+                sample_count += 1
+                self.sample_tree.insert("", "end", text=f"{sample_count:04d}",
+                                       values=(config.region, config.product, allocation[stratum_id]))
+        
+        # Update stats
+        stats_text = f"Total Samples Selected: {len(self.sample_result)}\n"
+        stats_text += f"Number of Strata: {len(self.strata)}\n"
+        stats_text += f"Allocation Method: Mandatory 1 per Stratum + Proportional\n"
+        stats_text += f"Selection Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        self.stats_label.config(text=stats_text)
+    
+    def export_results(self):
+        """Export sample results to CSV"""
+        if not self.sample_result:
+            messagebox.showwarning("Warning", "Please select samples first")
+            return
+        
+        file_path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                 filetypes=[("CSV files", "*.csv")])
+        if not file_path:
+            return
+        
+        try:
+            # Prepare export data
+            export_data = []
+            for i, sample in enumerate(self.sample_result, 1):
+                row = {'Sample_ID': f"{i:04d}", 'Region': sample['region'], 'Product': sample['product']}
+                row.update(sample['record'])
+                export_data.append(row)
+            
+            export_df = pd.DataFrame(export_data)
+            export_df.to_csv(file_path, index=False)
+            
+            messagebox.showinfo("Success", f"Samples exported to {file_path}")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export: {str(e)}")
+
+
+def main():
+    root = tk.Tk()
+    app = AuditSamplingApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
