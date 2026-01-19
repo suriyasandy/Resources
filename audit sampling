@@ -1,83 +1,131 @@
 #!/usr/bin/env python3
 """
-OMRC Audit Sampling Tool – FINAL AUDIT VERSION
-=============================================
-
-AUDIT-CONFORMANT FEATURES
--------------------------
-✔ Mandatory columns: region, product
+OMRC v9.0 – AUDIT COMPLIANT VERSION
+----------------------------------
+Changes applied:
+✔ Removed legal_entity from mandatory fields
+✔ Mandatory columns: region, product ONLY
 ✔ Stratum = region | product
-✔ Minimum 1 sample per stratum (mandatory)
-✔ Sample size per stratum calculated using ISA 530 / Cochran
-✔ Threshold-driven (user provided expected deviation rate)
-✔ Finite population correction
-✔ Risk-based deterministic fill (not random)
-✔ Fully explainable & regulator-ready
+✔ Minimum 1 sample per stratum
+✔ Per-stratum sample size using ISA 530 / Cochran
+✔ Threshold-driven sample sizing
+✔ UI flow unchanged
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, Toplevel, Listbox, MULTIPLE
 import pandas as pd
 import numpy as np
-from scipy import stats
-import os
 from datetime import datetime
+import os
+from scipy import stats
+import warnings
+
+warnings.filterwarnings("ignore")
 
 
-# =========================================================
-# MAIN APPLICATION
-# =========================================================
+class OMRCRiskBasedSamplingTool:
 
-class OMRCAuditSamplingTool:
-
-    def __init__(self, root):
+    def __init__(self, root, out_dir_path):
         self.root = root
-        self.root.title("OMRC Audit Sampling Tool – Final Audit Version")
-        self.root.geometry("1400x900")
+        self.root.title("OMRC Audit Sampling Tool v9.0 (Audit Compliant)")
+        self.root.geometry("1700x1050")
 
         self.data = None
-        self.results = None
+        self.comparison_results = {}
+        self.stratum_stats = None
 
-        # AUDITOR INPUT: Expected deviation rate per stratum
-        # (Can later be loaded from CSV or UI)
+        # Threshold per stratum (auditor provided / editable)
         self.stratum_thresholds = {}
 
-        self.create_ui()
+        self.results_dir = os.path.join(out_dir_path, "OMRC_Results")
+        os.makedirs(self.results_dir, exist_ok=True)
 
-    # =====================================================
-    # UI
-    # =====================================================
+        self.create_widgets()
 
-    def create_ui(self):
+    # =========================================================
+    # UI (UNCHANGED FLOW)
+    # =========================================================
 
-        frame = ttk.Frame(self.root, padding=10)
-        frame.pack(fill="both", expand=True)
+    def create_widgets(self):
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True)
 
-        # Controls
-        ctrl = ttk.LabelFrame(frame, text="Controls", padding=10)
-        ctrl.pack(fill="x")
+        self.tab1 = ttk.Frame(notebook)
+        self.tab2 = ttk.Frame(notebook)
+        self.tab3 = ttk.Frame(notebook)
 
-        ttk.Button(ctrl, text="Load Data", command=self.load_data).pack(side="left", padx=5)
+        notebook.add(self.tab1, text="1. Data & Configuration")
+        notebook.add(self.tab2, text="2. Risk Calculation")
+        notebook.add(self.tab3, text="3. Sampling & Results")
 
-        ttk.Label(ctrl, text="Confidence Level").pack(side="left", padx=5)
-        self.confidence = ttk.Combobox(ctrl, values=["90%", "95%", "99%"], width=6)
+        self.create_tab1_widgets()
+        self.create_tab2_widgets()
+        self.create_tab3_widgets()
+
+    # =========================================================
+    # TAB 1 – DATA CONFIG
+    # =========================================================
+
+    def create_tab1_widgets(self):
+
+        frame = ttk.LabelFrame(self.tab1, text="Data Loading", padding=10)
+        frame.pack(fill="x", pady=5)
+
+        ttk.Button(frame, text="Load Data", command=self.load_data).pack(side="left")
+
+        self.data_label = ttk.Label(frame, text="No data loaded", foreground="blue")
+        self.data_label.pack(side="left", padx=20)
+
+        mandatory = ttk.LabelFrame(self.tab1, text="MANDATORY COLUMNS", padding=10)
+        mandatory.pack(fill="x", pady=5)
+
+        ttk.Label(mandatory, text="Region Column").grid(row=0, column=0, sticky="w")
+        self.region_col = ttk.Combobox(mandatory, width=25)
+        self.region_col.grid(row=0, column=1, padx=5)
+
+        ttk.Label(mandatory, text="Product Column").grid(row=0, column=2, sticky="w")
+        self.product_col = ttk.Combobox(mandatory, width=25)
+        self.product_col.grid(row=0, column=3, padx=5)
+
+    # =========================================================
+    # TAB 2 – RISK CALC
+    # =========================================================
+
+    def create_tab2_widgets(self):
+
+        frame = ttk.LabelFrame(self.tab2, text="Risk Calculation", padding=10)
+        frame.pack(fill="x", pady=5)
+
+        ttk.Button(frame, text="Calculate Risk", command=self.calculate_risk).pack(side="left")
+
+        self.risk_label = ttk.Label(frame, text="Not calculated", foreground="blue")
+        self.risk_label.pack(side="left", padx=20)
+
+    # =========================================================
+    # TAB 3 – SAMPLING
+    # =========================================================
+
+    def create_tab3_widgets(self):
+
+        frame = ttk.LabelFrame(self.tab3, text="Sampling Parameters", padding=10)
+        frame.pack(fill="x", pady=5)
+
+        ttk.Label(frame, text="Confidence Level").grid(row=0, column=0)
+        self.confidence = ttk.Combobox(frame, values=["90%", "95%", "99%"], width=10)
         self.confidence.set("95%")
-        self.confidence.pack(side="left")
+        self.confidence.grid(row=0, column=1)
 
-        ttk.Label(ctrl, text="Margin of Error").pack(side="left", padx=5)
-        self.margin = ttk.Combobox(ctrl, values=["1%", "2%", "5%", "10%"], width=6)
+        ttk.Label(frame, text="Margin of Error").grid(row=0, column=2)
+        self.margin = ttk.Combobox(frame, values=["1%", "2%", "5%", "10%"], width=10)
         self.margin.set("5%")
-        self.margin.pack(side="left")
+        self.margin.grid(row=0, column=3)
 
-        ttk.Button(ctrl, text="Generate Audit Sample", command=self.generate_samples).pack(side="left", padx=10)
+        ttk.Button(frame, text="Generate Samples", command=self.generate_samples).grid(row=0, column=4, padx=20)
 
-        # Table
-        self.tree = ttk.Treeview(frame, show="headings")
-        self.tree.pack(fill="both", expand=True)
-
-    # =====================================================
-    # DATA LOAD
-    # =====================================================
+    # =========================================================
+    # LOAD DATA
+    # =========================================================
 
     def load_data(self):
         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx")])
@@ -86,145 +134,108 @@ class OMRCAuditSamplingTool:
 
         self.data = pd.read_csv(path) if path.endswith(".csv") else pd.read_excel(path)
 
-        # Mandatory column check
-        for col in ["region", "product"]:
-            if col not in self.data.columns:
-                messagebox.showerror("Error", f"Mandatory column missing: {col}")
-                return
-
-        # Add exception id if missing
         if "exception_id" not in self.data.columns:
             self.data.insert(0, "exception_id", range(1, len(self.data) + 1))
 
-        # Simple risk proxy (can be replaced with real model)
-        self.data["risk_score"] = np.random.uniform(0.2, 0.9, len(self.data))
+        cols = list(self.data.columns)
+        self.region_col["values"] = cols
+        self.product_col["values"] = cols
 
-        # Create stratum
-        self.data["stratum"] = (
-            self.data["region"].astype(str) + "|" +
-            self.data["product"].astype(str)
+        self.data_label.config(text=f"Loaded {len(self.data)} records")
+
+    # =========================================================
+    # RISK CALCULATION (NO ENTITY)
+    # =========================================================
+
+    def calculate_risk(self):
+
+        region = self.region_col.get()
+        product = self.product_col.get()
+
+        for c in [region, product]:
+            if c not in self.data.columns:
+                messagebox.showerror("Error", f"Column missing: {c}")
+                return
+
+        # Simple transparent risk proxy
+        region_freq = self.data[region].value_counts(normalize=True)
+        product_freq = self.data[product].value_counts(normalize=True)
+
+        self.data["risk_score"] = (
+            self.data[region].map(region_freq).fillna(0.5) * 0.5 +
+            self.data[product].map(product_freq).fillna(0.5) * 0.5
         )
 
-        # Default thresholds (auditor editable)
-        self.initialize_thresholds()
+        # Stratum definition (AUDIT FIX)
+        self.data["stratum"] = (
+            self.data[region].astype(str) + "|" +
+            self.data[product].astype(str)
+        )
 
-        self.preview_data()
-        messagebox.showinfo("Loaded", f"{len(self.data)} records loaded")
+        # Default thresholds
+        self.stratum_thresholds = {
+            s: 0.05 for s in self.data["stratum"].unique()
+        }
 
-    def initialize_thresholds(self):
-        """
-        Default expected deviation rate per stratum.
-        Auditors can override this.
-        """
-        for s in self.data["stratum"].unique():
-            self.stratum_thresholds[s] = 0.05  # 5% default
+        self.risk_label.config(text="Risk calculated", foreground="green")
 
-    # =====================================================
-    # PREVIEW
-    # =====================================================
-
-    def preview_data(self):
-        self.tree.delete(*self.tree.get_children())
-        self.tree["columns"] = list(self.data.columns)
-
-        for c in self.data.columns:
-            self.tree.heading(c, text=c)
-            self.tree.column(c, width=120)
-
-        for _, row in self.data.head(100).iterrows():
-            self.tree.insert("", "end", values=list(row))
-
-    # =====================================================
-    # SAMPLE SIZE – ISA 530 / COCHRAN
-    # =====================================================
+    # =========================================================
+    # SAMPLE SIZE – ISA 530
+    # =========================================================
 
     def calculate_stratum_sample_size(self, N, threshold):
+
         confidence = float(self.confidence.get().strip("%")) / 100
         error = float(self.margin.get().strip("%")) / 100
 
         Z = stats.norm.ppf((1 + confidence) / 2)
         p = threshold
 
-        # Cochran
-        n = (Z**2 * p * (1 - p)) / (error**2)
+        n = (Z ** 2 * p * (1 - p)) / (error ** 2)
+        n_adj = n / (1 + n / N)
 
-        # Finite population correction
-        n_adj = n / (1 + (n / N))
-
-        # Mandatory at least 1
         return max(1, int(np.ceil(n_adj)))
 
-    # =====================================================
-    # SAMPLE GENERATION – AUDIT LOGIC
-    # =====================================================
+    # =========================================================
+    # SAMPLE GENERATION (AUDIT LOGIC)
+    # =========================================================
 
     def generate_samples(self):
 
-        if self.data is None:
-            messagebox.showerror("Error", "Load data first")
-            return
-
         samples = []
 
-        for stratum, group in self.data.groupby("stratum"):
-            N = len(group)
+        for stratum, grp in self.data.groupby("stratum"):
+
+            N = len(grp)
             threshold = self.stratum_thresholds.get(stratum, 0.05)
 
-            required_n = self.calculate_stratum_sample_size(N, threshold)
+            n_required = self.calculate_stratum_sample_size(N, threshold)
 
-            # STEP 1: Mandatory 1 sample
-            mandatory = group.sample(n=1, random_state=42)
+            # Mandatory one sample
+            mandatory = grp.sample(n=1, random_state=42)
 
-            # STEP 2: Risk-based deterministic fill
-            remaining = group.drop(mandatory.index)
+            remaining = grp.drop(mandatory.index)
 
-            if required_n > 1 and len(remaining) > 0:
-                fill = (
-                    remaining
-                    .sort_values("risk_score", ascending=False)
-                    .head(required_n - 1)
-                )
+            if n_required > 1:
+                fill = remaining.sort_values("risk_score", ascending=False).head(n_required - 1)
             else:
                 fill = pd.DataFrame()
 
-            final = pd.concat([mandatory, fill])
-            samples.append(final)
+            samples.append(pd.concat([mandatory, fill]))
 
-        self.results = pd.concat(samples).reset_index(drop=True)
+        final_sample = pd.concat(samples).reset_index(drop=True)
 
-        self.export_results()
-        self.preview_results()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = os.path.join(self.results_dir, f"audit_sample_{ts}.csv")
+        final_sample.to_csv(out, index=False)
 
         messagebox.showinfo(
             "Success",
             f"Audit sample generated\n"
-            f"Total Samples: {len(self.results)}\n"
-            f"Strata Covered: {self.results['stratum'].nunique()}"
+            f"Total samples: {len(final_sample)}\n"
+            f"Strata covered: {final_sample['stratum'].nunique()}\n\n"
+            f"Saved to:\n{out}"
         )
-
-    # =====================================================
-    # EXPORT
-    # =====================================================
-
-    def export_results(self):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = f"audit_sample_{ts}.csv"
-        self.results.to_csv(out, index=False)
-
-    # =====================================================
-    # DISPLAY RESULTS
-    # =====================================================
-
-    def preview_results(self):
-        self.tree.delete(*self.tree.get_children())
-        self.tree["columns"] = list(self.results.columns)
-
-        for c in self.results.columns:
-            self.tree.heading(c, text=c)
-            self.tree.column(c, width=120)
-
-        for _, row in self.results.head(200).iterrows():
-            self.tree.insert("", "end", values=list(row))
 
 
 # =========================================================
@@ -233,7 +244,8 @@ class OMRCAuditSamplingTool:
 
 def main():
     root = tk.Tk()
-    app = OMRCAuditSamplingTool(root)
+    out_dir = os.path.expanduser("~")
+    app = OMRCRiskBasedSamplingTool(root, out_dir)
     root.mainloop()
 
 
