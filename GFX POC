@@ -2,17 +2,17 @@ import streamlit as st
 import polars as pl
 from pathlib import Path
 
-# ----------------------------------------------------
+# =====================================================
 # PAGE CONFIG
-# ----------------------------------------------------
+# =====================================================
 st.set_page_config(page_title="OMRC – GFX Execution Context", layout="wide")
 
 st.title("OMRC – GFX Execution Context Platform")
-st.caption("Historical baseline | Latest trade inference | OMRC-safe explanations")
+st.caption("Polars | Large-file safe | Historical baseline | Daily inference")
 
-# ----------------------------------------------------
+# =====================================================
 # CONFIG
-# ----------------------------------------------------
+# =====================================================
 DATA_DIR = Path("./data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -29,34 +29,44 @@ REQUIRED_COLS = [
     "bui_value"
 ]
 
-# ----------------------------------------------------
+# =====================================================
 # HELPERS
-# ----------------------------------------------------
-def ensure_columns(df):
+# =====================================================
+def load_any_path(path: str) -> pl.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} does not exist")
+
+    if path.suffix.lower() == ".parquet":
+        return pl.read_parquet(path)
+    elif path.suffix.lower() == ".csv":
+        return pl.read_csv(path, ignore_errors=True)
+    else:
+        raise ValueError("Only CSV or Parquet supported")
+
+def ensure_columns(df: pl.DataFrame) -> pl.DataFrame:
     for c in REQUIRED_COLS:
         if c not in df.columns:
             df = df.with_columns(pl.lit(None).alias(c))
     return df
 
-def parse_trade_date(df):
-    return df.with_columns(
-        pl.col("trade_date")
-        .cast(pl.Utf8, strict=False)
-        .str.strptime(pl.Datetime, DATE_FORMAT, strict=False)
-        .alias("trade_datetime")
-    ).with_columns(
-        pl.col("trade_datetime").dt.date().alias("trade_date_only")
+def parse_trade_date(df: pl.DataFrame) -> pl.DataFrame:
+    return (
+        df.with_columns(
+            pl.col("trade_date")
+            .cast(pl.Utf8, strict=False)
+            .str.strptime(pl.Datetime, DATE_FORMAT, strict=False)
+            .alias("trade_datetime")
+        )
+        .with_columns(
+            pl.col("trade_datetime").dt.date().alias("trade_date_only")
+        )
     )
 
-def load_any(file):
-    if file.name.endswith(".parquet"):
-        return pl.read_parquet(file)
-    return pl.read_csv(file, ignore_errors=True)
+def build_baseline(df: pl.DataFrame):
+    valid_dates = df.select(pl.col("trade_date_only").drop_nulls().count()).item() > 0
 
-def build_baseline(df):
-    has_dates = df.select(pl.col("trade_date_only").drop_nulls().count()).item() > 0
-
-    if has_dates:
+    if valid_dates:
         keys = ["book", "trade_date_only", "ccy_pair"]
         note = "Baseline uses trade date"
     else:
@@ -70,9 +80,10 @@ def build_baseline(df):
             pl.count().alias("baseline_trade_count")
         ])
     )
+
     return baseline, keys, note
 
-def generate_explanation(row):
+def explain(row):
     msgs = []
 
     if row["is_btb"]:
@@ -89,96 +100,95 @@ def generate_explanation(row):
 
     return "; ".join(msgs)
 
-# ----------------------------------------------------
+# =====================================================
 # SECTION 1 – HISTORICAL BASELINE
-# ----------------------------------------------------
-st.header("1️⃣ Historical Baseline Setup (One-time)")
+# =====================================================
+st.header("1️⃣ Historical Baseline (One-time)")
 
 hist_path = st.text_input(
-    "Provide path to historical GFX CSV (will be converted to Parquet)",
-    placeholder="C:/data/GFX_HIST_20260101_20260107.csv"
+    "Path to historical GFX CSV / Parquet",
+    placeholder="C:/data/GFX_HBEU_20260101_20260110.csv"
 )
 
 if st.button("Prepare Historical Baseline"):
     if not hist_path:
-        st.error("Please provide a valid file path")
+        st.error("Please provide a valid historical file path")
     else:
-        with st.spinner("Loading historical data..."):
-            hist_df = pl.read_csv(hist_path, ignore_errors=True)
+        with st.spinner("Preparing historical baseline..."):
+            hist_df = load_any_path(hist_path)
             hist_df = ensure_columns(hist_df)
             hist_df = parse_trade_date(hist_df)
             hist_df.write_parquet(HIST_PARQUET)
 
-        st.success(f"Historical baseline saved to {HIST_PARQUET}")
+        st.success(f"Historical baseline saved → {HIST_PARQUET}")
 
-# ----------------------------------------------------
-# STOP if no baseline exists
-# ----------------------------------------------------
+# =====================================================
+# STOP IF BASELINE NOT READY
+# =====================================================
 if not HIST_PARQUET.exists():
-    st.warning("Please prepare historical baseline before uploading latest file")
+    st.warning("Historical baseline not found. Prepare it first.")
     st.stop()
 
-# ----------------------------------------------------
-# SECTION 2 – LATEST FILE INFERENCE
-# ----------------------------------------------------
-st.header("2️⃣ Upload Latest GFX Trade File (Daily)")
+# =====================================================
+# SECTION 2 – DAILY FILE INFERENCE (LARGE FILE SAFE)
+# =====================================================
+st.header("2️⃣ Daily GFX File Inference")
 
-latest_file = st.file_uploader(
-    "Upload latest GFX CSV or Parquet",
-    type=["csv", "parquet"]
+daily_path = st.text_input(
+    "Path to DAILY GFX CSV / Parquet",
+    placeholder="C:/data/GFX_HBEU_RIVER_20260116.csv"
 )
 
-if not latest_file:
+if not daily_path:
     st.stop()
 
-with st.spinner("Loading latest trades..."):
-    latest_df = load_any(latest_file)
-    latest_df = ensure_columns(latest_df)
-    latest_df = parse_trade_date(latest_df)
+with st.spinner("Loading daily GFX file..."):
+    daily_df = load_any_path(daily_path)
+    daily_df = ensure_columns(daily_df)
+    daily_df = parse_trade_date(daily_df)
 
-st.success(f"Loaded {latest_df.height:,} latest trades")
+st.success(f"Loaded {daily_df.height:,} daily trades")
 
-# ----------------------------------------------------
-# LOAD BASELINE
-# ----------------------------------------------------
+# =====================================================
+# BASELINE LOAD
+# =====================================================
 hist_df = pl.read_parquet(HIST_PARQUET)
 
 baseline_df, baseline_keys, baseline_note = build_baseline(hist_df)
-
 st.info(baseline_note)
 
-# ----------------------------------------------------
-# JOIN BASELINE TO LATEST
-# ----------------------------------------------------
-latest_df = latest_df.join(baseline_df, on=baseline_keys, how="left")
+# =====================================================
+# JOIN BASELINE
+# =====================================================
+daily_df = daily_df.join(baseline_df, on=baseline_keys, how="left")
 
-# ----------------------------------------------------
+# =====================================================
 # FEATURES
-# ----------------------------------------------------
-latest_df = latest_df.with_columns([
+# =====================================================
+daily_df = daily_df.with_columns([
     (pl.col("base_currency_prin_amount") /
      pl.col("baseline_median_principal")).alias("principal_ratio"),
 
     (pl.col("bui_value") == "BTB").fill_null(False).alias("is_btb")
 ])
 
-# ----------------------------------------------------
+# =====================================================
 # EXPLANATIONS
-# ----------------------------------------------------
-latest_df = latest_df.with_columns(
+# =====================================================
+daily_df = daily_df.with_columns(
     pl.struct([
         "principal_ratio",
         "baseline_trade_count",
         "is_btb"
-    ]).map_elements(generate_explanation).alias("execution_explanation")
+    ]).map_elements(explain).alias("execution_explanation")
 )
 
-# ----------------------------------------------------
-# DISPLAY
-# ----------------------------------------------------
-st.header("3️⃣ Execution Context Output")
+# =====================================================
+# OUTPUT
+# =====================================================
+st.header("3️⃣ Execution Context Output (Sample)")
 
-cols = [
+display_cols = [
     "book",
     "ccy_pair",
     "tenor",
@@ -189,28 +199,17 @@ cols = [
 ]
 
 st.dataframe(
-    latest_df.select([c for c in cols if c in latest_df.columns]).head(500),
+    daily_df.select([c for c in display_cols if c in daily_df.columns]).head(500),
     use_container_width=True
 )
 
-# ----------------------------------------------------
-# SUMMARY METRICS
-# ----------------------------------------------------
+# =====================================================
+# SUMMARY
+# =====================================================
 st.header("4️⃣ Summary")
 
-st.metric(
-    "Elevated Notional Trades",
-    latest_df.filter(pl.col("principal_ratio") > 3).height
-)
+st.metric("Elevated Notional Trades", daily_df.filter(pl.col("principal_ratio") > 3).height)
+st.metric("Back-to-Back Trades", daily_df.filter(pl.col("is_btb")).height)
+st.metric("Low Baseline Confidence", daily_df.filter(pl.col("baseline_trade_count") < 5).height)
 
-st.metric(
-    "Back-to-Back Trades",
-    latest_df.filter(pl.col("is_btb")).height
-)
-
-st.metric(
-    "Low Baseline Confidence",
-    latest_df.filter(pl.col("baseline_trade_count") < 5).height
-)
-
-st.success("Inference completed successfully")
+st.success("Daily inference completed successfully")
