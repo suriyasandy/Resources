@@ -11,6 +11,7 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
+from sklearn.impute import SimpleImputer
 
 # =========================================================
 # PAGE CONFIG
@@ -26,10 +27,9 @@ st.caption(
 )
 
 # =========================================================
-# MODE SELECTION (CRITICAL FOR GOVERNANCE)
+# MODE SELECTION (GOVERNANCE CRITICAL)
 # =========================================================
 st.sidebar.header("Application Mode")
-
 mode = st.sidebar.radio(
     "Select Mode",
     ["Inference (Default)", "Training (Admin Only)"]
@@ -48,7 +48,7 @@ df = pd.read_csv(file)
 # =========================================================
 # DATETIME HANDLING
 # =========================================================
-df["omrctradeTradedate"] = pd.to_datetime(df["omrctradeTradedate"])
+df["omrctradeTradedate"] = pd.to_datetime(df["omrctradeTradedate"], errors="coerce")
 df["trade_date"] = df["omrctradeTradedate"].dt.date
 
 # =========================================================
@@ -81,12 +81,14 @@ TENOR_BUCKETS = {
     "1Y": "Long", "2Y": "Long", "3Y": "Long", "4Y": "Long"
 }
 
-df["tenor_bucket"] = df["omrctradeTenor"].map(TENOR_BUCKETS).fillna("Other")
+df["tenor_bucket"] = df["omrctradeTenor"].map(TENOR_BUCKETS)
 
 # =========================================================
 # LIQUIDITY WINDOW
 # =========================================================
 def liquidity_window(ts):
+    if pd.isna(ts):
+        return np.nan
     h = ts.hour
     if h < 6:
         return "Asia"
@@ -136,7 +138,7 @@ df = df.merge(
 )
 
 # =========================================================
-# WEAK LABEL GENERATION (OMRC-CORRECT)
+# WEAK LABEL GENERATION (OMRC APPROVED)
 # =========================================================
 def generate_weak_label(row):
     score = 0
@@ -157,14 +159,17 @@ df["explainable_label"] = df.apply(generate_weak_label, axis=1)
 # =========================================================
 # FEATURES
 # =========================================================
-FEATURES = [
+categorical_features = [
     "product_group",
     "tenor_bucket",
     "liquidity_window",
     "principal_bucket",
-    "ccy_liquidity",
-    "cluster_trade_count"
+    "ccy_liquidity"
 ]
+
+numeric_features = ["cluster_trade_count"]
+
+FEATURES = categorical_features + numeric_features
 
 # =========================================================
 # TRAINING MODE (ADMIN ONLY)
@@ -172,11 +177,10 @@ FEATURES = [
 if mode == "Training (Admin Only)":
 
     st.subheader("⚠️ Model Training – Admin Only")
-
     st.info(
-        "This mode trains a NEW model using weak labels derived from OMRC rules.\n\n"
-        "• Training is explicit\n"
-        "• Model is versioned\n"
+        "• Weak labels derived from OMRC rules\n"
+        "• Explicit training trigger\n"
+        "• Model versioned & saved\n"
         "• No automatic retraining"
     )
 
@@ -185,10 +189,23 @@ if mode == "Training (Admin Only)":
         X = df[FEATURES]
         y = df["explainable_label"]
 
+        categorical_pipeline = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("encoder", OneHotEncoder(handle_unknown="ignore"))
+            ]
+        )
+
+        numeric_pipeline = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median"))
+            ]
+        )
+
         preprocessor = ColumnTransformer(
-            [
-                ("cat", OneHotEncoder(handle_unknown="ignore"), FEATURES[:-1]),
-                ("num", "passthrough", ["cluster_trade_count"]),
+            transformers=[
+                ("cat", categorical_pipeline, categorical_features),
+                ("num", numeric_pipeline, numeric_features)
             ]
         )
 
@@ -203,10 +220,9 @@ if mode == "Training (Admin Only)":
 
         version = datetime.now().strftime("%Y%m%d_%H%M")
         model_name = f"model_omrc_gfx_{version}.pkl"
-
         joblib.dump(model, model_name)
 
-        st.success(f"Model trained and saved as {model_name}")
+        st.success(f"✅ Model trained and saved as {model_name}")
 
 # =========================================================
 # INFERENCE MODE (DEFAULT)
@@ -214,16 +230,16 @@ if mode == "Training (Admin Only)":
 else:
     st.subheader("🔎 Inference Mode")
 
-    model_files = [f for f in os.listdir() if f.startswith("model_omrc_gfx")]
+    model_files = sorted(
+        [f for f in os.listdir() if f.startswith("model_omrc_gfx")]
+    )
 
     if not model_files:
-        st.warning("No trained model found. ML scoring disabled.")
+        st.error("❌ No trained model found. Please train a model first.")
         st.stop()
 
-    latest_model = sorted(model_files)[-1]
-    model = joblib.load(latest_model)
-
-    st.info(f"Using model: {latest_model}")
+    model = joblib.load(model_files[-1])
+    st.info(f"Using model: {model_files[-1]}")
 
     # ML SCORE
     df["ml_explainability_score"] = model.predict_proba(df[FEATURES])[:, 1]
@@ -256,7 +272,7 @@ else:
     ]
 
     # =====================================================
-    # OVERVIEW
+    # OVERVIEW TABLE
     # =====================================================
     st.subheader("📋 OMRC Alert Overview")
 
