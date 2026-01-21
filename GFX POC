@@ -1,0 +1,163 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+st.set_page_config(page_title="OMRC GFX Phase-1 POC", layout="wide")
+
+st.title("📊 OMRC – GFX Phase-1 Execution Context Dashboard")
+st.caption("Scope: FXF / FXS | Purpose: Execution explainability (NOT linkage)")
+
+# ---------------------------
+# Load Data
+# ---------------------------
+uploaded_file = st.file_uploader("Upload GFX OMRC Alert File", type=["csv"])
+
+if uploaded_file:
+    df = pd.read_csv(uploaded_file, parse_dates=["trade_time"])
+
+    # ---------------------------
+    # Feature Engineering
+    # ---------------------------
+    def liquidity_window(ts):
+        h = ts.hour
+        if 0 <= h < 6:
+            return "Asia"
+        elif 6 <= h < 12:
+            return "London"
+        elif 12 <= h < 18:
+            return "NY"
+        else:
+            return "Off-Hours"
+
+    df["liquidity_window"] = df["trade_time"].apply(liquidity_window)
+
+    df["principal_bucket"] = pd.cut(
+        df["principal"],
+        bins=[0, 25e6, 100e6, np.inf],
+        labels=["Small", "Medium", "Large"]
+    )
+
+    df["tenor_bucket"] = df["tenor"].replace({
+        "ON": "Short",
+        "TN": "Short",
+        "SN": "Short",
+        "1M": "Short",
+        "3M": "Medium",
+        "6M": "Medium",
+        "1Y": "Long"
+    }).fillna("Long")
+
+    # ---------------------------
+    # Liquidity Stress Flag
+    # ---------------------------
+    df["liquidity_stress"] = np.where(
+        (df["principal_bucket"] == "Large") &
+        (df["liquidity_window"].isin(["Asia", "Off-Hours"])),
+        "High",
+        "Normal"
+    )
+
+    # ---------------------------
+    # Intent Inference (Rule-based, Phase-1)
+    # ---------------------------
+    def infer_intent(row):
+        hedge = 0
+        funding = 0
+        portfolio = 0
+
+        if row["trade_type"] == "FXF":
+            hedge += 2
+        if row["trade_type"] == "FXS":
+            funding += 2
+        if row["principal_bucket"] == "Large":
+            hedge += 1
+            portfolio += 1
+        if row["liquidity_window"] in ["Asia", "Off-Hours"]:
+            hedge += 1
+            funding += 1
+
+        total = hedge + funding + portfolio + 1e-6
+        return {
+            "Hedge": round(hedge / total, 2),
+            "Funding": round(funding / total, 2),
+            "Portfolio": round(portfolio / total, 2)
+        }
+
+    df["intent_scores"] = df.apply(infer_intent, axis=1)
+
+    # ---------------------------
+    # Dashboard Filters
+    # ---------------------------
+    st.sidebar.header("Filters")
+    ccy = st.sidebar.multiselect(
+        "Currency Pair",
+        options=df["currency_pair"].unique(),
+        default=df["currency_pair"].unique()
+    )
+
+    trade_type = st.sidebar.multiselect(
+        "Trade Type",
+        options=df["trade_type"].unique(),
+        default=df["trade_type"].unique()
+    )
+
+    filtered_df = df[
+        (df["currency_pair"].isin(ccy)) &
+        (df["trade_type"].isin(trade_type))
+    ]
+
+    # ---------------------------
+    # Main Table
+    # ---------------------------
+    st.subheader("📋 OMRC Alert Overview")
+    st.dataframe(
+        filtered_df[[
+            "trade_id",
+            "currency_pair",
+            "trade_type",
+            "principal",
+            "tenor",
+            "liquidity_window",
+            "liquidity_stress"
+        ]],
+        use_container_width=True
+    )
+
+    # ---------------------------
+    # Trade Drilldown
+    # ---------------------------
+    st.subheader("🔍 Trade Drilldown")
+
+    selected_trade = st.selectbox(
+        "Select Trade ID",
+        filtered_df["trade_id"].unique()
+    )
+
+    trade = filtered_df[filtered_df["trade_id"] == selected_trade].iloc[0]
+
+    st.markdown("### Execution Context")
+    st.json({
+        "Currency Pair": trade["currency_pair"],
+        "Trade Type": trade["trade_type"],
+        "Principal": trade["principal"],
+        "Tenor": trade["tenor"],
+        "Liquidity Window": trade["liquidity_window"],
+        "Liquidity Stress": trade["liquidity_stress"]
+    })
+
+    st.markdown("### Intent Likelihood")
+    st.bar_chart(pd.DataFrame(trade["intent_scores"], index=["Probability"]).T)
+
+    st.markdown("### OMRC Explanation (Auto-Draft)")
+    st.info(
+        f"""
+        The FX {trade['trade_type']} trade in {trade['currency_pair']} was executed
+        with a principal of {int(trade['principal']/1e6)}m during the {trade['liquidity_window']} window.
+        The observed execution context indicates {trade['liquidity_stress']} liquidity stress.
+        Based on size, timing, and instrument type, the trade is likely associated with
+        hedging, funding, or portfolio management activity rather than abusive execution.
+        """
+    )
+
+else:
+    st.warning("Upload a GFX OMRC alert file to begin.")
