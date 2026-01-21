@@ -1,265 +1,182 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
+import polars as pl
+from pathlib import Path
+from datetime import timedelta
 
 # =========================================================
-# PAGE CONFIG
+# STREAMLIT CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="OMRC GFX – Execution Context Viewer",
+    page_title="OMRC GFX – Execution Context Platform",
     layout="wide"
 )
 
-st.title("📊 OMRC – GFX Execution Context Viewer")
+st.title("📊 OMRC – GFX Execution Context Platform")
 st.caption(
-    "Purpose: Surface execution context only | "
-    "No pricing judgement | No linkage | No auto-closure"
+    "Principal-based | Polars | Historical baseline | OMRC-safe explanations"
 )
 
 # =========================================================
-# FILE UPLOAD
+# SIDEBAR – HISTORICAL DATA PREP
 # =========================================================
-file = st.file_uploader("Upload OMRC GFX Dataset (CSV)", type=["csv"])
-if not file:
-    st.warning("Please upload OMRC GFX data to continue.")
+st.sidebar.header("📁 Historical Data Setup")
+
+hist_csv_path = st.sidebar.text_input(
+    "Path to historical GFX CSV (week-level)",
+    placeholder="/data/omrc/gfx_history_week.csv"
+)
+
+PARQUET_DIR = Path("./parquet_cache")
+PARQUET_DIR.mkdir(exist_ok=True)
+
+hist_parquet_path = None
+
+if hist_csv_path:
+    hist_csv_path = Path(hist_csv_path)
+
+    if not hist_csv_path.exists():
+        st.sidebar.error("Historical CSV file not found.")
+    else:
+        hist_parquet_path = PARQUET_DIR / f"{hist_csv_path.stem}.parquet"
+
+        if hist_parquet_path.exists():
+            st.sidebar.success("Cached Parquet found.")
+        else:
+            with st.sidebar.spinner("Converting historical CSV → Parquet (one-time)..."):
+                hist_df = pl.scan_csv(hist_csv_path, infer_schema_length=10000).collect()
+                hist_df.write_parquet(hist_parquet_path)
+            st.sidebar.success("Historical data converted to Parquet.")
+
+if not hist_parquet_path:
     st.stop()
 
-df = pd.read_csv(file)
+hist_df = pl.read_parquet(hist_parquet_path)
 
 # =========================================================
-# DATETIME HANDLING
+# UPLOAD LATEST FILE
 # =========================================================
-df["omrctradeTradedate"] = pd.to_datetime(
-    df["omrctradeTradedate"], errors="coerce"
-)
-df["trade_date"] = df["omrctradeTradedate"].dt.date
+st.header("📤 Upload Latest GFX Trade File")
 
-# =========================================================
-# PRODUCT NORMALISATION
-# =========================================================
-PRODUCT_MAP = {
-    "FXF": "FX Forward",
-    "FXFO": "FX Forward",
-    "FWD": "FX Forward",
-    "FXS": "FX Swap",
-    "SPOT": "FX Spot",
-    "SPT": "FX Spot"
-}
-
-df["product_group"] = df["omrctradeProductsubtype"].map(PRODUCT_MAP)
-
-df = df[df["product_group"].isin(["FX Forward", "FX Swap"])]
-
-# =========================================================
-# TENOR BUCKETING
-# =========================================================
-TENOR_BUCKETS = {
-    "ON": "Very Short", "TN": "Very Short", "SN": "Very Short", "SPT": "Very Short",
-    "2W": "Short", "3W": "Short",
-    "1M": "Short", "2M": "Short", "3M": "Short",
-    "4M": "Medium", "5M": "Medium", "6M": "Medium",
-    "7M": "Medium", "8M": "Medium", "9M": "Medium",
-    "10M": "Medium", "11M": "Medium",
-    "18M": "Long",
-    "1Y": "Long", "2Y": "Long", "3Y": "Long", "4Y": "Long"
-}
-
-df["tenor_bucket"] = df["omrctradeTenor"].map(TENOR_BUCKETS)
-
-# =========================================================
-# LIQUIDITY WINDOW
-# =========================================================
-def liquidity_window(ts):
-    if pd.isna(ts):
-        return np.nan
-    h = ts.hour
-    if h < 6:
-        return "Asia"
-    elif h < 12:
-        return "London"
-    elif h < 17:
-        return "New York"
-    else:
-        return "Off-hours"
-
-df["liquidity_window"] = df["omrctradeTradedate"].apply(liquidity_window)
-
-# =========================================================
-# PRINCIPAL BUCKET
-# =========================================================
-df["principal_bucket"] = pd.cut(
-    df["omrctradeBasecurrprincipalamt"],
-    bins=[0, 25e6, 100e6, np.inf],
-    labels=["Small", "Medium", "Large"]
+latest_file = st.file_uploader(
+    "Upload latest GFX CSV or Parquet",
+    type=["csv", "parquet"]
 )
 
-# =========================================================
-# CURRENCY LIQUIDITY (STRUCTURAL)
-# =========================================================
-G10 = [
-    "EUR/USD", "USD/JPY", "GBP/USD", "USD/CHF",
-    "AUD/USD", "USD/CAD", "NZD/USD"
-]
+if not latest_file:
+    st.stop()
 
-df["ccy_liquidity"] = df["omrctradeCcyPair"].apply(
-    lambda x: "G10" if x in G10 else "Non-G10"
-)
+if latest_file.name.endswith(".parquet"):
+    df = pl.read_parquet(latest_file)
+else:
+    df = pl.scan_csv(latest_file, infer_schema_length=10000).collect()
 
 # =========================================================
-# PORTFOLIO CLUSTERING (BOOK + DAY + CCY)
+# NORMALISATION
+# =========================================================
+def normalise(df: pl.DataFrame) -> pl.DataFrame:
+    df = df.with_columns([
+        pl.col("trade_date")
+          .str.strptime(pl.Datetime, strict=False)
+          .alias("trade_ts"),
+        (pl.col("base_currency_cd") + "/" + pl.col("orig_currency_cd"))
+          .alias("ccy_pair"),
+    ])
+
+    df = df.with_columns([
+        pl.col("trade_ts").dt.date().alias("trade_date_only"),
+        pl.col("tenor").fill_null("UNKNOWN"),
+        pl.when(pl.col("base_currency_prin_amount") < 25_000_000)
+          .then("Small")
+          .when(pl.col("base_currency_prin_amount") < 100_000_000)
+          .then("Medium")
+          .otherwise("Large")
+          .alias("principal_bucket"),
+        pl.col("bui_value")
+          .cast(pl.Utf8)
+          .str.to_uppercase()
+          .is_in(["BTB", "BACKTOBACK", "BACK_TO_BACK"])
+          .alias("btb_flag")
+    ])
+
+    return df
+
+df = normalise(df)
+hist_df = normalise(hist_df)
+
+# =========================================================
+# PORTFOLIO CLUSTERING (TODAY)
 # =========================================================
 cluster_df = (
-    df.groupby(["uctradeBookname", "trade_date", "omrctradeCcyPair"])
-      .size()
-      .reset_index(name="cluster_trade_count")
+    df.groupby(["book", "trade_date_only", "ccy_pair"])
+      .count()
+      .rename({"count": "same_day_book_trades"})
 )
 
-df = df.merge(
+df = df.join(
     cluster_df,
-    on=["uctradeBookname", "trade_date", "omrctradeCcyPair"],
+    on=["book", "trade_date_only", "ccy_pair"]
+)
+
+# =========================================================
+# HISTORICAL BASELINE (LAST 5 BUSINESS DAYS)
+# =========================================================
+max_date = df.select(pl.col("trade_date_only").max()).item()
+baseline_start = max_date - timedelta(days=5)
+
+baseline = (
+    hist_df.filter(pl.col("trade_date_only") < max_date)
+           .filter(pl.col("trade_date_only") >= baseline_start)
+           .groupby(["book", "ccy_pair"])
+           .agg(
+               pl.col("base_currency_prin_amount")
+               .median()
+               .alias("hist_median_principal")
+           )
+)
+
+df = df.join(
+    baseline,
+    on=["book", "ccy_pair"],
     how="left"
 )
 
-# =========================================================
-# BTB / LIFECYCLE FLAGS
-# =========================================================
-# Assumption (as per your note):
-# omrctradebuivalue identifies BTB trades
-df["btb_flag"] = df["omrctradebuivalue"].astype(str).str.upper().isin(
-    ["BTB", "BACKTOBACK", "BACK_TO_BACK"]
+df = df.with_columns(
+    pl.when(pl.col("base_currency_prin_amount") > pl.col("hist_median_principal"))
+      .then("Higher than recent executions")
+      .otherwise("In line with recent executions")
+      .alias("historical_size_context")
 )
-
-# Optional lifecycle flags (only if present)
-df["amended_flag"] = df.get("amendedFlag", False)
-df["cancelled_flag"] = df.get("cancelledFlag", False)
-
-# =========================================================
-# STRICT ALLOWED LANGUAGE EXPLANATION BUILDER
-# =========================================================
-def build_explanation(row):
-    explanation = []
-
-    # ---------- FACTUAL ----------
-    if pd.notna(row["liquidity_window"]):
-        explanation.append(
-            f"Trade executed during {row['liquidity_window']} hours."
-        )
-
-    if pd.notna(row["principal_bucket"]):
-        explanation.append(
-            f"Trade size is categorised as {row['principal_bucket']}."
-        )
-
-    if pd.notna(row["tenor_bucket"]):
-        explanation.append(
-            f"Trade tenor falls into the {row['tenor_bucket']} bucket."
-        )
-
-    if pd.notna(row["ccy_liquidity"]):
-        explanation.append(
-            f"Currency pair is classified as {row['ccy_liquidity']}."
-        )
-
-    # ---------- CONTEXTUAL (NON-JUDGEMENTAL) ----------
-    context_drivers = 0
-
-    if row["liquidity_window"] in ["Asia", "Off-hours"]:
-        explanation.append(
-            "Execution occurred during a lower-liquidity market window."
-        )
-        context_drivers += 1
-
-    if row["tenor_bucket"] in ["Medium", "Long"]:
-        explanation.append(
-            "Tenor profile increases sensitivity to forward pricing assumptions."
-        )
-        context_drivers += 1
-
-    if row["cluster_trade_count"] >= 2:
-        explanation.append(
-            "Multiple trades observed in the same book and currency on the same day."
-        )
-        context_drivers += 1
-
-    # ---------- LIFECYCLE ----------
-    if row["btb_flag"]:
-        explanation.append(
-            "Trade identified as back-to-back execution; internal transfer characteristics may apply."
-        )
-
-    if row["amended_flag"]:
-        explanation.append(
-            "Trade has been amended post initial execution; amendment timing may influence observed values."
-        )
-
-    if row["cancelled_flag"]:
-        explanation.append(
-            "Trade marked as cancelled; alert retained for audit traceability."
-        )
-
-    # ---------- RULE CONTEXT ----------
-    rule_reason = row.get("rule_failure_reason")
-    if pd.notna(rule_reason) and str(rule_reason).strip() != "":
-        explanation.append(
-            f"Rule failure reason recorded as: {rule_reason}"
-        )
-    else:
-        explanation.append(
-            "No explicit rule failure reason recorded for this alert."
-        )
-
-    # ---------- OUTCOME (STRICT) ----------
-    if context_drivers >= 2:
-        explanation.append(
-            "Multiple execution context factors are present that may explain the alert trigger."
-        )
-    else:
-        explanation.append(
-            "Limited execution context factors observed; further review may be required."
-        )
-
-    return explanation
 
 # =========================================================
 # FILTERS
 # =========================================================
 st.sidebar.header("Filters")
 
-ccy_filter = st.sidebar.multiselect(
-    "Currency Pair",
-    df["omrctradeCcyPair"].unique(),
-    df["omrctradeCcyPair"].unique()
-)
-
 book_filter = st.sidebar.multiselect(
     "Book",
-    df["uctradeBookname"].dropna().unique(),
-    df["uctradeBookname"].dropna().unique()
+    df.select("book").unique().to_series().to_list()
 )
 
-fdf = df[
-    (df["omrctradeCcyPair"].isin(ccy_filter)) &
-    (df["uctradeBookname"].isin(book_filter))
-]
+if book_filter:
+    df = df.filter(pl.col("book").is_in(book_filter))
 
 # =========================================================
 # OVERVIEW TABLE
 # =========================================================
-st.subheader("📋 OMRC Alert Overview")
+st.subheader("📋 OMRC GFX Alert Overview")
 
 st.dataframe(
-    fdf[
-        [
-            "exceptionId",
-            "omrctradeCcyPair",
-            "product_group",
-            "omrctradeTenor",
-            "principal_bucket",
-            "liquidity_window",
-            "cluster_trade_count",
-            "btb_flag"
-        ]
-    ],
+    df.select([
+        "trade_id",
+        "ccy_pair",
+        "product",
+        "tenor",
+        "principal_bucket",
+        "same_day_book_trades",
+        "historical_size_context",
+        "btb_flag",
+        "deviation_percent"
+    ]).to_pandas(),
     use_container_width=True
 )
 
@@ -268,27 +185,54 @@ st.dataframe(
 # =========================================================
 st.subheader("🔍 Trade Drilldown")
 
-selected_id = st.selectbox(
-    "Select Exception ID",
-    fdf["exceptionId"].unique()
+selected_trade = st.selectbox(
+    "Select Trade ID",
+    df.select("trade_id").unique().to_series().to_list()
 )
 
-trade = fdf[fdf["exceptionId"] == selected_id].iloc[0]
-
-st.json({
-    "Currency Pair": trade["omrctradeCcyPair"],
-    "Product": trade["product_group"],
-    "Tenor": trade["omrctradeTenor"],
-    "Principal Bucket": trade["principal_bucket"],
-    "Liquidity Window": trade["liquidity_window"],
-    "BTB Trade": trade["btb_flag"],
-    "Same-Day Book Trades": int(trade["cluster_trade_count"])
-})
+trade = df.filter(pl.col("trade_id") == selected_trade).row(0)
+trade_dict = dict(zip(df.columns, trade))
 
 # =========================================================
-# EXECUTION CONTEXT SUMMARY
+# EXECUTION CONTEXT SUMMARY (STRICT LANGUAGE)
 # =========================================================
-st.subheader("📝 Execution Context Summary (OMRC-Safe)")
+st.subheader("📝 Execution Context Summary")
 
-for line in build_explanation(trade):
-    st.write("•", line)
+def explain_trade(t):
+    lines = []
+
+    lines.append(f"Trade executed in book '{t['book']}' for currency pair {t['ccy_pair']}.")
+
+    lines.append(f"Trade size falls into the '{t['principal_bucket']}' principal category.")
+
+    if t["same_day_book_trades"] > 1:
+        lines.append(
+            "Multiple trades were observed in the same book and currency on the same business date."
+        )
+
+    lines.append(t["historical_size_context"] + " for this book and currency.")
+
+    if t["btb_flag"]:
+        lines.append(
+            "Trade is identified as back-to-back; internal transfer characteristics may apply."
+        )
+
+    if t.get("alert_description"):
+        lines.append(
+            "Alert generated based on predefined OMRC rule conditions."
+        )
+
+    lines.append(
+        "This summary provides execution context only and does not assess pricing correctness."
+    )
+
+    return lines
+
+for l in explain_trade(trade_dict):
+    st.write("•", l)
+
+# =========================================================
+# RAW VIEW (AUDIT FRIENDLY)
+# =========================================================
+with st.expander("🔎 View Full Trade Record (Audit / Ops)"):
+    st.json(trade_dict)
