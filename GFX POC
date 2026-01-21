@@ -1,65 +1,127 @@
 import streamlit as st
 import polars as pl
 from pathlib import Path
-from datetime import timedelta
 
-# =========================================================
-# STREAMLIT CONFIG
-# =========================================================
-st.set_page_config(
-    page_title="OMRC GFX – Execution Context Platform",
-    layout="wide"
-)
+# ----------------------------------------------------
+# PAGE CONFIG
+# ----------------------------------------------------
+st.set_page_config(page_title="OMRC – GFX Execution Context", layout="wide")
 
-st.title("📊 OMRC – GFX Execution Context Platform")
-st.caption(
-    "Principal-based | Polars | Historical baseline | OMRC-safe explanations"
-)
+st.title("OMRC – GFX Execution Context Platform")
+st.caption("Historical baseline | Latest trade inference | OMRC-safe explanations")
 
-# =========================================================
-# SIDEBAR – HISTORICAL DATA SETUP
-# =========================================================
-st.sidebar.header("📁 Historical Data Setup")
+# ----------------------------------------------------
+# CONFIG
+# ----------------------------------------------------
+DATA_DIR = Path("./data")
+DATA_DIR.mkdir(exist_ok=True)
 
-hist_csv_path = st.sidebar.text_input(
-    "Path to historical GFX CSV (week-level)",
-    placeholder="C:/data/gfx_history_week.csv"
-)
+HIST_PARQUET = DATA_DIR / "historical_gfx.parquet"
 
-PARQUET_DIR = Path("./parquet_cache")
-PARQUET_DIR.mkdir(exist_ok=True)
+DATE_FORMAT = "%d/%m/%Y %H:%M:%S%.f"
 
-hist_parquet_path = None
+REQUIRED_COLS = [
+    "book",
+    "ccy_pair",
+    "tenor",
+    "trade_date",
+    "base_currency_prin_amount",
+    "bui_value"
+]
 
-if hist_csv_path:
-    hist_csv_path = Path(hist_csv_path)
+# ----------------------------------------------------
+# HELPERS
+# ----------------------------------------------------
+def ensure_columns(df):
+    for c in REQUIRED_COLS:
+        if c not in df.columns:
+            df = df.with_columns(pl.lit(None).alias(c))
+    return df
 
-    if not hist_csv_path.exists():
-        st.sidebar.error("Historical CSV file not found.")
+def parse_trade_date(df):
+    return df.with_columns(
+        pl.col("trade_date")
+        .cast(pl.Utf8, strict=False)
+        .str.strptime(pl.Datetime, DATE_FORMAT, strict=False)
+        .alias("trade_datetime")
+    ).with_columns(
+        pl.col("trade_datetime").dt.date().alias("trade_date_only")
+    )
+
+def load_any(file):
+    if file.name.endswith(".parquet"):
+        return pl.read_parquet(file)
+    return pl.read_csv(file, ignore_errors=True)
+
+def build_baseline(df):
+    has_dates = df.select(pl.col("trade_date_only").drop_nulls().count()).item() > 0
+
+    if has_dates:
+        keys = ["book", "trade_date_only", "ccy_pair"]
+        note = "Baseline uses trade date"
     else:
-        hist_parquet_path = PARQUET_DIR / f"{hist_csv_path.stem}.parquet"
+        keys = ["book", "ccy_pair", "tenor"]
+        note = "Baseline uses structural grouping (no valid trade dates)"
 
-        if hist_parquet_path.exists():
-            st.sidebar.success("Cached Parquet found.")
-        else:
-            with st.sidebar.spinner("Converting historical CSV → Parquet (one-time)..."):
-                hist_df_tmp = pl.scan_csv(
-                    hist_csv_path,
-                    infer_schema_length=10000
-                ).collect()
-                hist_df_tmp.write_parquet(hist_parquet_path)
-            st.sidebar.success("Historical data converted to Parquet.")
+    baseline = (
+        df.group_by(keys)
+        .agg([
+            pl.median("base_currency_prin_amount").alias("baseline_median_principal"),
+            pl.count().alias("baseline_trade_count")
+        ])
+    )
+    return baseline, keys, note
 
-if not hist_parquet_path or not hist_parquet_path.exists():
-    st.warning("Provide valid historical CSV path to proceed.")
+def generate_explanation(row):
+    msgs = []
+
+    if row["is_btb"]:
+        msgs.append("Back-to-back trade")
+
+    if row["principal_ratio"] > 3:
+        msgs.append("Execution notional materially larger than historical median")
+
+    if row["baseline_trade_count"] < 5:
+        msgs.append("Limited historical reference for this execution")
+
+    if not msgs:
+        msgs.append("Execution consistent with historical trading behaviour")
+
+    return "; ".join(msgs)
+
+# ----------------------------------------------------
+# SECTION 1 – HISTORICAL BASELINE
+# ----------------------------------------------------
+st.header("1️⃣ Historical Baseline Setup (One-time)")
+
+hist_path = st.text_input(
+    "Provide path to historical GFX CSV (will be converted to Parquet)",
+    placeholder="C:/data/GFX_HIST_20260101_20260107.csv"
+)
+
+if st.button("Prepare Historical Baseline"):
+    if not hist_path:
+        st.error("Please provide a valid file path")
+    else:
+        with st.spinner("Loading historical data..."):
+            hist_df = pl.read_csv(hist_path, ignore_errors=True)
+            hist_df = ensure_columns(hist_df)
+            hist_df = parse_trade_date(hist_df)
+            hist_df.write_parquet(HIST_PARQUET)
+
+        st.success(f"Historical baseline saved to {HIST_PARQUET}")
+
+# ----------------------------------------------------
+# STOP if no baseline exists
+# ----------------------------------------------------
+if not HIST_PARQUET.exists():
+    st.warning("Please prepare historical baseline before uploading latest file")
     st.stop()
 
-hist_df = pl.read_parquet(hist_parquet_path)
-
-# =========================================================
-# UPLOAD LATEST FILE
-# =========================================================
-st.header("📤 Upload Latest GFX Trade File")
+# ----------------------------------------------------
+# SECTION 2 – LATEST FILE INFERENCE
+# ----------------------------------------------------
+st.header("2️⃣ Upload Latest GFX Trade File (Daily)")
 
 latest_file = st.file_uploader(
     "Upload latest GFX CSV or Parquet",
@@ -69,231 +131,86 @@ latest_file = st.file_uploader(
 if not latest_file:
     st.stop()
 
-if latest_file.name.endswith(".parquet"):
-    df = pl.read_parquet(latest_file)
-else:
-    df = pl.scan_csv(
-        latest_file,
-        infer_schema_length=10000
-    ).collect()
+with st.spinner("Loading latest trades..."):
+    latest_df = load_any(latest_file)
+    latest_df = ensure_columns(latest_df)
+    latest_df = parse_trade_date(latest_df)
 
-# =========================================================
-# NORMALISATION WITH ROBUST DATE FALLBACK
-# =========================================================
-def parse_trade_timestamp(df: pl.DataFrame) -> pl.Expr:
-    """
-    Robust date parsing:
-    1) Try trade_date in multiple formats
-    2) Fallback to business_date
-    """
-    trade_date_parsed = pl.coalesce([
-        pl.col("trade_date").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False),
-        pl.col("trade_date").str.strptime(pl.Datetime, "%Y-%m-%d", strict=False),
-        pl.col("trade_date").str.strptime(pl.Datetime, "%d-%b-%Y", strict=False),
-        pl.col("trade_date").str.strptime(pl.Datetime, "%Y%m%d", strict=False)
-    ])
+st.success(f"Loaded {latest_df.height:,} latest trades")
 
-    business_date_parsed = pl.coalesce([
-        pl.col("business_date").str.strptime(pl.Datetime, "%Y-%m-%d", strict=False),
-        pl.col("business_date").str.strptime(pl.Datetime, "%Y%m%d", strict=False)
-    ])
+# ----------------------------------------------------
+# LOAD BASELINE
+# ----------------------------------------------------
+hist_df = pl.read_parquet(HIST_PARQUET)
 
-    return pl.coalesce([trade_date_parsed, business_date_parsed]).alias("trade_ts")
+baseline_df, baseline_keys, baseline_note = build_baseline(hist_df)
 
+st.info(baseline_note)
 
-def normalise(df: pl.DataFrame) -> pl.DataFrame:
-    df = df.with_columns([
-        parse_trade_timestamp(df),
-        (pl.col("base_currency_cd") + "/" + pl.col("orig_currency_cd"))
-            .alias("ccy_pair")
-    ])
+# ----------------------------------------------------
+# JOIN BASELINE TO LATEST
+# ----------------------------------------------------
+latest_df = latest_df.join(baseline_df, on=baseline_keys, how="left")
 
-    df = df.with_columns([
-        pl.col("trade_ts").dt.date().alias("trade_date_only"),
+# ----------------------------------------------------
+# FEATURES
+# ----------------------------------------------------
+latest_df = latest_df.with_columns([
+    (pl.col("base_currency_prin_amount") /
+     pl.col("baseline_median_principal")).alias("principal_ratio"),
 
-        pl.when(pl.col("base_currency_prin_amount") < 25_000_000)
-          .then("Small")
-          .when(pl.col("base_currency_prin_amount") < 100_000_000)
-          .then("Medium")
-          .otherwise("Large")
-          .alias("principal_bucket"),
+    (pl.col("bui_value") == "BTB").fill_null(False).alias("is_btb")
+])
 
-        pl.col("bui_value")
-          .cast(pl.Utf8)
-          .str.to_uppercase()
-          .is_in(["BTB", "BACKTOBACK", "BACK_TO_BACK"])
-          .alias("btb_flag")
-    ])
-
-    return df
-
-
-df = normalise(df)
-hist_df = normalise(hist_df)
-
-# =========================================================
-# DATA QUALITY WARNING (AUDIT SAFE)
-# =========================================================
-invalid_dates = df.filter(pl.col("trade_ts").is_null()).height
-if invalid_dates > 0:
-    st.warning(
-        f"{invalid_dates} trades have unparseable trade_date and business_date values. "
-        "They are retained but excluded from date-based comparisons."
-    )
-
-# =========================================================
-# PORTFOLIO CLUSTERING (TODAY)
-# =========================================================
-cluster_df = (
-    df.filter(pl.col("trade_date_only").is_not_null())
-      .groupby(["book", "trade_date_only", "ccy_pair"])
-      .count()
-      .rename({"count": "same_day_book_trades"})
+# ----------------------------------------------------
+# EXPLANATIONS
+# ----------------------------------------------------
+latest_df = latest_df.with_columns(
+    pl.struct([
+        "principal_ratio",
+        "baseline_trade_count",
+        "is_btb"
+    ]).map_elements(generate_explanation).alias("execution_explanation")
 )
 
-df = df.join(
-    cluster_df,
-    on=["book", "trade_date_only", "ccy_pair"],
-    how="left"
-)
+# ----------------------------------------------------
+# DISPLAY
+# ----------------------------------------------------
+st.header("3️⃣ Execution Context Output")
 
-df = df.with_columns(
-    pl.col("same_day_book_trades").fill_null(1)
-)
-
-# =========================================================
-# HISTORICAL BASELINE (LAST 5 BUSINESS DAYS)
-# =========================================================
-valid_today_dates = df.filter(pl.col("trade_date_only").is_not_null())
-
-if valid_today_dates.height == 0:
-    st.error("No valid trade dates available for baseline comparison.")
-    st.stop()
-
-max_date = valid_today_dates.select(pl.col("trade_date_only").max()).item()
-baseline_start = max_date - timedelta(days=5)
-
-baseline = (
-    hist_df.filter(pl.col("trade_date_only").is_not_null())
-           .filter(pl.col("trade_date_only") < max_date)
-           .filter(pl.col("trade_date_only") >= baseline_start)
-           .groupby(["book", "ccy_pair"])
-           .agg(
-               pl.col("base_currency_prin_amount")
-               .median()
-               .alias("hist_median_principal")
-           )
-)
-
-df = df.join(
-    baseline,
-    on=["book", "ccy_pair"],
-    how="left"
-)
-
-df = df.with_columns(
-    pl.when(
-        (pl.col("hist_median_principal").is_not_null()) &
-        (pl.col("base_currency_prin_amount") > pl.col("hist_median_principal"))
-    )
-    .then("Higher than recent executions")
-    .otherwise("In line with recent executions")
-    .alias("historical_size_context")
-)
-
-# =========================================================
-# FILTERS
-# =========================================================
-st.sidebar.header("Filters")
-
-book_filter = st.sidebar.multiselect(
-    "Book",
-    df.select("book").unique().to_series().to_list()
-)
-
-if book_filter:
-    df = df.filter(pl.col("book").is_in(book_filter))
-
-# =========================================================
-# OVERVIEW TABLE
-# =========================================================
-st.subheader("📋 OMRC GFX Alert Overview")
+cols = [
+    "book",
+    "ccy_pair",
+    "tenor",
+    "base_currency_prin_amount",
+    "baseline_median_principal",
+    "baseline_trade_count",
+    "execution_explanation"
+]
 
 st.dataframe(
-    df.select([
-        "trade_id",
-        "ccy_pair",
-        "product",
-        "tenor",
-        "principal_bucket",
-        "same_day_book_trades",
-        "historical_size_context",
-        "btb_flag",
-        "deviation_percent"
-    ]).to_pandas(),
+    latest_df.select([c for c in cols if c in latest_df.columns]).head(500),
     use_container_width=True
 )
 
-# =========================================================
-# DRILLDOWN
-# =========================================================
-st.subheader("🔍 Trade Drilldown")
+# ----------------------------------------------------
+# SUMMARY METRICS
+# ----------------------------------------------------
+st.header("4️⃣ Summary")
 
-selected_trade = st.selectbox(
-    "Select Trade ID",
-    df.select("trade_id").unique().to_series().to_list()
+st.metric(
+    "Elevated Notional Trades",
+    latest_df.filter(pl.col("principal_ratio") > 3).height
 )
 
-trade = df.filter(pl.col("trade_id") == selected_trade).row(0)
-trade_dict = dict(zip(df.columns, trade))
+st.metric(
+    "Back-to-Back Trades",
+    latest_df.filter(pl.col("is_btb")).height
+)
 
-# =========================================================
-# EXECUTION CONTEXT SUMMARY (STRICT LANGUAGE)
-# =========================================================
-st.subheader("📝 Execution Context Summary")
+st.metric(
+    "Low Baseline Confidence",
+    latest_df.filter(pl.col("baseline_trade_count") < 5).height
+)
 
-def explain_trade(t: dict):
-    lines = []
-
-    lines.append(
-        f"Trade executed in book '{t['book']}' for currency pair {t['ccy_pair']}."
-    )
-
-    lines.append(
-        f"Trade size falls into the '{t['principal_bucket']}' principal category."
-    )
-
-    if t["same_day_book_trades"] > 1:
-        lines.append(
-            "Multiple trades were observed in the same book and currency on the same business date."
-        )
-
-    lines.append(
-        t["historical_size_context"] + " for this book and currency."
-    )
-
-    if t["btb_flag"]:
-        lines.append(
-            "Trade is identified as back-to-back; internal transfer characteristics may apply."
-        )
-
-    if t.get("alert_description"):
-        lines.append(
-            "Alert generated based on predefined OMRC rule conditions."
-        )
-
-    lines.append(
-        "This summary provides execution context only and does not assess pricing correctness."
-    )
-
-    return lines
-
-
-for line in explain_trade(trade_dict):
-    st.write("•", line)
-
-# =========================================================
-# RAW VIEW (AUDIT / OPS)
-# =========================================================
-with st.expander("🔎 View Full Trade Record (Audit / Ops)"):
-    st.json(trade_dict)
+st.success("Inference completed successfully")
