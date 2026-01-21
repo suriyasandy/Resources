@@ -1,38 +1,19 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import shap
-import joblib
-import os
-import matplotlib.pyplot as plt
-from datetime import datetime
-
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
-from sklearn.impute import SimpleImputer
 
 # =========================================================
 # PAGE CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="OMRC GFX Explainability Platform",
+    page_title="OMRC GFX – Execution Context Viewer",
     layout="wide"
 )
 
-st.title("📊 OMRC – GFX Explainability & Prioritisation Platform")
+st.title("📊 OMRC – GFX Execution Context Viewer")
 st.caption(
-    "OMRC-only | Execution-quality context | No trade linkage | No auto-closure"
-)
-
-# =========================================================
-# MODE SELECTION (GOVERNANCE CRITICAL)
-# =========================================================
-st.sidebar.header("Application Mode")
-mode = st.sidebar.radio(
-    "Select Mode",
-    ["Inference (Default)", "Training (Admin Only)"]
+    "Purpose: Surface execution context only | "
+    "No pricing judgement | No linkage | No auto-closure"
 )
 
 # =========================================================
@@ -48,7 +29,9 @@ df = pd.read_csv(file)
 # =========================================================
 # DATETIME HANDLING
 # =========================================================
-df["omrctradeTradedate"] = pd.to_datetime(df["omrctradeTradedate"], errors="coerce")
+df["omrctradeTradedate"] = pd.to_datetime(
+    df["omrctradeTradedate"], errors="coerce"
+)
 df["trade_date"] = df["omrctradeTradedate"].dt.date
 
 # =========================================================
@@ -64,14 +47,14 @@ PRODUCT_MAP = {
 }
 
 df["product_group"] = df["omrctradeProductsubtype"].map(PRODUCT_MAP)
+
 df = df[df["product_group"].isin(["FX Forward", "FX Swap"])]
 
 # =========================================================
 # TENOR BUCKETING
 # =========================================================
 TENOR_BUCKETS = {
-    "ON": "Spot / Very Short", "TN": "Spot / Very Short",
-    "SN": "Spot / Very Short", "SPT": "Spot / Very Short",
+    "ON": "Very Short", "TN": "Very Short", "SN": "Very Short", "SPT": "Very Short",
     "2W": "Short", "3W": "Short",
     "1M": "Short", "2M": "Short", "3M": "Short",
     "4M": "Medium", "5M": "Medium", "6M": "Medium",
@@ -95,23 +78,11 @@ def liquidity_window(ts):
     elif h < 12:
         return "London"
     elif h < 17:
-        return "NY"
+        return "New York"
     else:
         return "Off-hours"
 
 df["liquidity_window"] = df["omrctradeTradedate"].apply(liquidity_window)
-
-# =========================================================
-# CURRENCY LIQUIDITY
-# =========================================================
-G10 = [
-    "EUR/USD", "USD/JPY", "GBP/USD", "USD/CHF",
-    "AUD/USD", "USD/CAD", "NZD/USD"
-]
-
-df["ccy_liquidity"] = df["omrctradeCcyPair"].apply(
-    lambda x: "G10" if x in G10 else "Non-G10"
-)
 
 # =========================================================
 # PRINCIPAL BUCKET
@@ -120,6 +91,18 @@ df["principal_bucket"] = pd.cut(
     df["omrctradeBasecurrprincipalamt"],
     bins=[0, 25e6, 100e6, np.inf],
     labels=["Small", "Medium", "Large"]
+)
+
+# =========================================================
+# CURRENCY LIQUIDITY (STRUCTURAL)
+# =========================================================
+G10 = [
+    "EUR/USD", "USD/JPY", "GBP/USD", "USD/CHF",
+    "AUD/USD", "USD/CAD", "NZD/USD"
+]
+
+df["ccy_liquidity"] = df["omrctradeCcyPair"].apply(
+    lambda x: "G10" if x in G10 else "Non-G10"
 )
 
 # =========================================================
@@ -138,217 +121,174 @@ df = df.merge(
 )
 
 # =========================================================
-# WEAK LABEL GENERATION (OMRC APPROVED)
+# BTB / LIFECYCLE FLAGS
 # =========================================================
-def generate_weak_label(row):
-    score = 0
-    if row["principal_bucket"] == "Large":
-        score += 1
-    if row["tenor_bucket"] in ["Medium", "Long"]:
-        score += 1
+# Assumption (as per your note):
+# omrctradebuivalue identifies BTB trades
+df["btb_flag"] = df["omrctradebuivalue"].astype(str).str.upper().isin(
+    ["BTB", "BACKTOBACK", "BACK_TO_BACK"]
+)
+
+# Optional lifecycle flags (only if present)
+df["amended_flag"] = df.get("amendedFlag", False)
+df["cancelled_flag"] = df.get("cancelledFlag", False)
+
+# =========================================================
+# STRICT ALLOWED LANGUAGE EXPLANATION BUILDER
+# =========================================================
+def build_explanation(row):
+    explanation = []
+
+    # ---------- FACTUAL ----------
+    if pd.notna(row["liquidity_window"]):
+        explanation.append(
+            f"Trade executed during {row['liquidity_window']} hours."
+        )
+
+    if pd.notna(row["principal_bucket"]):
+        explanation.append(
+            f"Trade size is categorised as {row['principal_bucket']}."
+        )
+
+    if pd.notna(row["tenor_bucket"]):
+        explanation.append(
+            f"Trade tenor falls into the {row['tenor_bucket']} bucket."
+        )
+
+    if pd.notna(row["ccy_liquidity"]):
+        explanation.append(
+            f"Currency pair is classified as {row['ccy_liquidity']}."
+        )
+
+    # ---------- CONTEXTUAL (NON-JUDGEMENTAL) ----------
+    context_drivers = 0
+
     if row["liquidity_window"] in ["Asia", "Off-hours"]:
-        score += 1
-    if row["cluster_trade_count"] >= 3:
-        score += 1
-    if row["ccy_liquidity"] == "Non-G10":
-        score += 1
-    return 1 if score >= 3 else 0
+        explanation.append(
+            "Execution occurred during a lower-liquidity market window."
+        )
+        context_drivers += 1
 
-df["explainable_label"] = df.apply(generate_weak_label, axis=1)
+    if row["tenor_bucket"] in ["Medium", "Long"]:
+        explanation.append(
+            "Tenor profile increases sensitivity to forward pricing assumptions."
+        )
+        context_drivers += 1
+
+    if row["cluster_trade_count"] >= 2:
+        explanation.append(
+            "Multiple trades observed in the same book and currency on the same day."
+        )
+        context_drivers += 1
+
+    # ---------- LIFECYCLE ----------
+    if row["btb_flag"]:
+        explanation.append(
+            "Trade identified as back-to-back execution; internal transfer characteristics may apply."
+        )
+
+    if row["amended_flag"]:
+        explanation.append(
+            "Trade has been amended post initial execution; amendment timing may influence observed values."
+        )
+
+    if row["cancelled_flag"]:
+        explanation.append(
+            "Trade marked as cancelled; alert retained for audit traceability."
+        )
+
+    # ---------- RULE CONTEXT ----------
+    rule_reason = row.get("rule_failure_reason")
+    if pd.notna(rule_reason) and str(rule_reason).strip() != "":
+        explanation.append(
+            f"Rule failure reason recorded as: {rule_reason}"
+        )
+    else:
+        explanation.append(
+            "No explicit rule failure reason recorded for this alert."
+        )
+
+    # ---------- OUTCOME (STRICT) ----------
+    if context_drivers >= 2:
+        explanation.append(
+            "Multiple execution context factors are present that may explain the alert trigger."
+        )
+    else:
+        explanation.append(
+            "Limited execution context factors observed; further review may be required."
+        )
+
+    return explanation
 
 # =========================================================
-# FEATURES
+# FILTERS
 # =========================================================
-categorical_features = [
-    "product_group",
-    "tenor_bucket",
-    "liquidity_window",
-    "principal_bucket",
-    "ccy_liquidity"
+st.sidebar.header("Filters")
+
+ccy_filter = st.sidebar.multiselect(
+    "Currency Pair",
+    df["omrctradeCcyPair"].unique(),
+    df["omrctradeCcyPair"].unique()
+)
+
+book_filter = st.sidebar.multiselect(
+    "Book",
+    df["uctradeBookname"].dropna().unique(),
+    df["uctradeBookname"].dropna().unique()
+)
+
+fdf = df[
+    (df["omrctradeCcyPair"].isin(ccy_filter)) &
+    (df["uctradeBookname"].isin(book_filter))
 ]
 
-numeric_features = ["cluster_trade_count"]
+# =========================================================
+# OVERVIEW TABLE
+# =========================================================
+st.subheader("📋 OMRC Alert Overview")
 
-FEATURES = categorical_features + numeric_features
+st.dataframe(
+    fdf[
+        [
+            "exceptionId",
+            "omrctradeCcyPair",
+            "product_group",
+            "omrctradeTenor",
+            "principal_bucket",
+            "liquidity_window",
+            "cluster_trade_count",
+            "btb_flag"
+        ]
+    ],
+    use_container_width=True
+)
 
 # =========================================================
-# TRAINING MODE (ADMIN ONLY)
+# DRILLDOWN
 # =========================================================
-if mode == "Training (Admin Only)":
+st.subheader("🔍 Trade Drilldown")
 
-    st.subheader("⚠️ Model Training – Admin Only")
-    st.info(
-        "• Weak labels derived from OMRC rules\n"
-        "• Explicit training trigger\n"
-        "• Model versioned & saved\n"
-        "• No automatic retraining"
-    )
+selected_id = st.selectbox(
+    "Select Exception ID",
+    fdf["exceptionId"].unique()
+)
 
-    if st.button("Train & Save Model"):
+trade = fdf[fdf["exceptionId"] == selected_id].iloc[0]
 
-        X = df[FEATURES]
-        y = df["explainable_label"]
-
-        categorical_pipeline = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="most_frequent")),
-                ("encoder", OneHotEncoder(handle_unknown="ignore"))
-            ]
-        )
-
-        numeric_pipeline = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="median"))
-            ]
-        )
-
-        preprocessor = ColumnTransformer(
-            transformers=[
-                ("cat", categorical_pipeline, categorical_features),
-                ("num", numeric_pipeline, numeric_features)
-            ]
-        )
-
-        model = Pipeline(
-            steps=[
-                ("prep", preprocessor),
-                ("clf", LogisticRegression(max_iter=500))
-            ]
-        )
-
-        model.fit(X, y)
-
-        version = datetime.now().strftime("%Y%m%d_%H%M")
-        model_name = f"model_omrc_gfx_{version}.pkl"
-        joblib.dump(model, model_name)
-
-        st.success(f"✅ Model trained and saved as {model_name}")
+st.json({
+    "Currency Pair": trade["omrctradeCcyPair"],
+    "Product": trade["product_group"],
+    "Tenor": trade["omrctradeTenor"],
+    "Principal Bucket": trade["principal_bucket"],
+    "Liquidity Window": trade["liquidity_window"],
+    "BTB Trade": trade["btb_flag"],
+    "Same-Day Book Trades": int(trade["cluster_trade_count"])
+})
 
 # =========================================================
-# INFERENCE MODE (DEFAULT)
+# EXECUTION CONTEXT SUMMARY
 # =========================================================
-else:
-    st.subheader("🔎 Inference Mode")
+st.subheader("📝 Execution Context Summary (OMRC-Safe)")
 
-    model_files = sorted(
-        [f for f in os.listdir() if f.startswith("model_omrc_gfx")]
-    )
-
-    if not model_files:
-        st.error("❌ No trained model found. Please train a model first.")
-        st.stop()
-
-    model = joblib.load(model_files[-1])
-    st.info(f"Using model: {model_files[-1]}")
-
-    # ML SCORE
-    df["ml_explainability_score"] = model.predict_proba(df[FEATURES])[:, 1]
-    df["review_priority"] = np.where(
-        df["ml_explainability_score"] < 0.4,
-        "High Priority",
-        "Normal Priority"
-    )
-
-    # =====================================================
-    # FILTERS
-    # =====================================================
-    st.sidebar.header("Filters")
-
-    ccy_filter = st.sidebar.multiselect(
-        "Currency Pair",
-        df["omrctradeCcyPair"].unique(),
-        df["omrctradeCcyPair"].unique()
-    )
-
-    book_filter = st.sidebar.multiselect(
-        "Book",
-        df["uctradeBookname"].dropna().unique(),
-        df["uctradeBookname"].dropna().unique()
-    )
-
-    fdf = df[
-        (df["omrctradeCcyPair"].isin(ccy_filter)) &
-        (df["uctradeBookname"].isin(book_filter))
-    ]
-
-    # =====================================================
-    # OVERVIEW TABLE
-    # =====================================================
-    st.subheader("📋 OMRC Alert Overview")
-
-    st.dataframe(
-        fdf[
-            [
-                "exceptionId",
-                "omrctradeCcyPair",
-                "product_group",
-                "omrctradeTenor",
-                "principal_bucket",
-                "liquidity_window",
-                "cluster_trade_count",
-                "ml_explainability_score",
-                "review_priority"
-            ]
-        ].sort_values("ml_explainability_score"),
-        use_container_width=True
-    )
-
-    # =====================================================
-    # DRILLDOWN
-    # =====================================================
-    st.subheader("🔍 Trade Drilldown")
-
-    selected_id = st.selectbox(
-        "Select Exception ID",
-        fdf["exceptionId"].unique()
-    )
-
-    trade = fdf[fdf["exceptionId"] == selected_id].iloc[0]
-
-    st.json({
-        "Currency Pair": trade["omrctradeCcyPair"],
-        "Product": trade["product_group"],
-        "Tenor": trade["omrctradeTenor"],
-        "Principal Bucket": trade["principal_bucket"],
-        "Liquidity Window": trade["liquidity_window"],
-        "Same-Day Book Trades": int(trade["cluster_trade_count"]),
-        "ML Explainability Score": round(trade["ml_explainability_score"], 3),
-        "Review Priority": trade["review_priority"]
-    })
-
-    # =====================================================
-    # SHAP EXPLAINABILITY
-    # =====================================================
-    st.subheader("🧠 SHAP Explainability")
-
-    X_row = trade[FEATURES].to_frame().T
-    X_transformed = model.named_steps["prep"].transform(X_row)
-
-    explainer = shap.Explainer(
-        model.named_steps["clf"],
-        model.named_steps["prep"].transform(df[FEATURES])
-    )
-
-    shap_values = explainer(X_transformed)
-
-    fig, ax = plt.subplots()
-    shap.plots.bar(shap_values[0], max_display=10, show=False)
-    st.pyplot(fig)
-
-    # =====================================================
-    # OMRC EXPLANATION
-    # =====================================================
-    st.subheader("📝 OMRC Explanation (Auto-Draft)")
-
-    st.info(
-        f"""
-        The {trade['product_group']} trade in {trade['omrctradeCcyPair']} with tenor
-        {trade['omrctradeTenor']} was executed during the {trade['liquidity_window']} window.
-        The trade formed part of {int(trade['cluster_trade_count'])} same-day executions
-        in the same book and currency.
-        Based on execution timing, tenor profile, trade size, and portfolio activity,
-        the execution context appears economically explainable.
-        The ML score is used solely for review prioritisation and does not represent
-        a determination of misconduct or intent.
-        """
-    )
+for line in build_explanation(trade):
+    st.write("•", line)
