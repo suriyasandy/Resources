@@ -8,7 +8,7 @@ from pathlib import Path
 st.set_page_config(page_title="OMRC – GFX Execution Context", layout="wide")
 
 st.title("OMRC – GFX Execution Context Platform")
-st.caption("Polars | Large-file safe | Historical baseline | Daily inference")
+st.caption("Structural baseline | Large-file safe | OMRC-approved logic")
 
 # =====================================================
 # CONFIG
@@ -21,6 +21,7 @@ HIST_PARQUET = DATA_DIR / "historical_gfx.parquet"
 DATE_FORMAT = "%d/%m/%Y %H:%M:%S%.f"
 
 REQUIRED_COLS = [
+    "trade_id",
     "book",
     "ccy_pair",
     "tenor",
@@ -63,33 +64,34 @@ def parse_trade_date(df: pl.DataFrame) -> pl.DataFrame:
         )
     )
 
+# =====================================================
+# BASELINE (STRUCTURAL – CORRECT)
+# =====================================================
 def build_baseline(df: pl.DataFrame):
-    valid_dates = df.select(pl.col("trade_date_only").drop_nulls().count()).item() > 0
-
-    if valid_dates:
-        keys = ["book", "trade_date_only", "ccy_pair"]
-        note = "Baseline uses trade date"
-    else:
-        keys = ["book", "ccy_pair", "tenor"]
-        note = "Baseline uses structural grouping (no valid trade dates)"
+    keys = ["book", "ccy_pair", "tenor"]
 
     baseline = (
         df.group_by(keys)
         .agg([
-            pl.median("base_currency_prin_amount").alias("baseline_median_principal"),
-            pl.count().alias("baseline_trade_count")
+            pl.median("base_currency_prin_amount")
+              .alias("baseline_median_principal"),
+            pl.count()
+              .alias("baseline_trade_count")
         ])
     )
 
-    return baseline, keys, note
+    return baseline, keys
 
 def explain(row):
     msgs = []
 
+    if row["baseline_trade_count"] is None:
+        return "No historical reference available for this execution"
+
     if row["is_btb"]:
         msgs.append("Back-to-back trade")
 
-    if row["principal_ratio"] > 3:
+    if row["principal_ratio"] is not None and row["principal_ratio"] > 3:
         msgs.append("Execution notional materially larger than historical median")
 
     if row["baseline_trade_count"] < 5:
@@ -120,7 +122,7 @@ if st.button("Prepare Historical Baseline"):
             hist_df = parse_trade_date(hist_df)
             hist_df.write_parquet(HIST_PARQUET)
 
-        st.success(f"Historical baseline saved → {HIST_PARQUET}")
+        st.success("Historical baseline prepared successfully")
 
 # =====================================================
 # STOP IF BASELINE NOT READY
@@ -130,7 +132,7 @@ if not HIST_PARQUET.exists():
     st.stop()
 
 # =====================================================
-# SECTION 2 – DAILY FILE INFERENCE (LARGE FILE SAFE)
+# SECTION 2 – DAILY FILE INFERENCE
 # =====================================================
 st.header("2️⃣ Daily GFX File Inference")
 
@@ -150,17 +152,21 @@ with st.spinner("Loading daily GFX file..."):
 st.success(f"Loaded {daily_df.height:,} daily trades")
 
 # =====================================================
-# BASELINE LOAD
+# LOAD BASELINE
 # =====================================================
 hist_df = pl.read_parquet(HIST_PARQUET)
+baseline_df, baseline_keys = build_baseline(hist_df)
 
-baseline_df, baseline_keys, baseline_note = build_baseline(hist_df)
-st.info(baseline_note)
+st.info("Baseline uses structural grouping: book + currency pair + tenor")
 
 # =====================================================
-# JOIN BASELINE
+# JOIN BASELINE (FIXED)
 # =====================================================
-daily_df = daily_df.join(baseline_df, on=baseline_keys, how="left")
+daily_df = daily_df.join(
+    baseline_df,
+    on=baseline_keys,
+    how="left"
+)
 
 # =====================================================
 # FEATURES
@@ -186,9 +192,10 @@ daily_df = daily_df.with_columns(
 # =====================================================
 # OUTPUT
 # =====================================================
-st.header("3️⃣ Execution Context Output (Sample)")
+st.header("3️⃣ Execution Context Output")
 
 display_cols = [
+    "trade_id",
     "book",
     "ccy_pair",
     "tenor",
@@ -208,8 +215,19 @@ st.dataframe(
 # =====================================================
 st.header("4️⃣ Summary")
 
-st.metric("Elevated Notional Trades", daily_df.filter(pl.col("principal_ratio") > 3).height)
-st.metric("Back-to-Back Trades", daily_df.filter(pl.col("is_btb")).height)
-st.metric("Low Baseline Confidence", daily_df.filter(pl.col("baseline_trade_count") < 5).height)
+st.metric(
+    "Trades with historical reference",
+    daily_df.filter(pl.col("baseline_trade_count").is_not_null()).height
+)
+
+st.metric(
+    "Back-to-Back Trades",
+    daily_df.filter(pl.col("is_btb")).height
+)
+
+st.metric(
+    "Elevated Notional Trades",
+    daily_df.filter(pl.col("principal_ratio") > 3).height
+)
 
 st.success("Daily inference completed successfully")
