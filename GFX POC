@@ -2,190 +2,283 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="OMRC GFX Phase-1", layout="wide")
+# -------------------------------------------------
+# Page config
+# -------------------------------------------------
+st.set_page_config(
+    page_title="OMRC GFX Phase-1++ Dashboard",
+    layout="wide"
+)
 
-st.title("📊 OMRC – GFX Phase-1 Execution Context Dashboard")
-st.caption("Scope: FX Forwards & FX Swaps | Purpose: Execution explainability (OMRC)")
+st.title("📊 OMRC – GFX Phase-1++ Execution Context Dashboard")
+st.caption(
+    "Scope: FX Forwards & FX Swaps | "
+    "Purpose: Execution-quality explainability (NO trade linkage)"
+)
 
-# -------------------------------
-# Upload Data
-# -------------------------------
-file = st.file_uploader("Upload OMRC GFX dataset", type=["csv"])
+# -------------------------------------------------
+# Upload
+# -------------------------------------------------
+file = st.file_uploader(
+    "Upload OMRC GFX dataset (CSV)",
+    type=["csv"]
+)
 
-if file:
-    df = pd.read_csv(file)
-    df["omrctradeTradedate"] = pd.to_datetime(df["omrctradeTradedate"])
+if not file:
+    st.warning("Upload OMRC GFX data to begin")
+    st.stop()
 
-    # -------------------------------
-    # PRODUCT NORMALIZATION
-    # -------------------------------
-    PRODUCT_MAP = {
-        "FXF": "FX Forward",
-        "FWD": "FX Forward",
-        "FXFO": "FX Forward",
-        "FXS": "FX Swap",
-        "SPOT": "FX Spot",
-        "SPT": "FX Spot"
+df = pd.read_csv(file)
+
+# -------------------------------------------------
+# Datetime normalization
+# -------------------------------------------------
+df["omrctradeTradedate"] = pd.to_datetime(df["omrctradeTradedate"])
+df["trade_date"] = df["omrctradeTradedate"].dt.date
+
+# -------------------------------------------------
+# PRODUCT NORMALIZATION (USING YOUR COLUMN)
+# -------------------------------------------------
+PRODUCT_MAP = {
+    "FXF": "FX Forward",
+    "FXFO": "FX Forward",
+    "FWD": "FX Forward",
+    "FXS": "FX Swap",
+    "SPOT": "FX Spot",
+    "SPT": "FX Spot"
+}
+
+df["product_group"] = df["omrctradeProductsubtype"].map(PRODUCT_MAP)
+
+# Phase-1 scope only
+df = df[df["product_group"].isin(["FX Forward", "FX Swap"])]
+
+# -------------------------------------------------
+# TENOR BUCKETING (YOUR VALUES)
+# -------------------------------------------------
+TENOR_BUCKETS = {
+    "ON": "Spot / Very Short",
+    "TN": "Spot / Very Short",
+    "SN": "Spot / Very Short",
+    "SPT": "Spot / Very Short",
+    "2W": "Short",
+    "3W": "Short",
+    "1M": "Short",
+    "2M": "Short",
+    "3M": "Short",
+    "4M": "Medium",
+    "5M": "Medium",
+    "6M": "Medium",
+    "7M": "Medium",
+    "8M": "Medium",
+    "9M": "Medium",
+    "10M": "Medium",
+    "11M": "Medium",
+    "18M": "Long",
+    "1Y": "Long",
+    "2Y": "Long",
+    "3Y": "Long",
+    "4Y": "Long",
+}
+
+df["tenor_bucket"] = df["omrctradeTenor"].map(TENOR_BUCKETS).fillna("Other")
+
+# -------------------------------------------------
+# LIQUIDITY WINDOW
+# -------------------------------------------------
+def liquidity_window(ts):
+    h = ts.hour
+    if h < 6:
+        return "Asia"
+    elif h < 12:
+        return "London"
+    elif h < 17:
+        return "NY"
+    else:
+        return "Off-hours"
+
+df["liquidity_window"] = df["omrctradeTradedate"].apply(liquidity_window)
+
+# -------------------------------------------------
+# CURRENCY LIQUIDITY (G10 vs Non-G10)
+# -------------------------------------------------
+G10 = [
+    "EUR/USD", "USD/JPY", "GBP/USD", "USD/CHF",
+    "AUD/USD", "USD/CAD", "NZD/USD"
+]
+
+df["ccy_liquidity"] = df["omrctradeCcyPair"].apply(
+    lambda x: "G10" if x in G10 else "Non-G10"
+)
+
+# -------------------------------------------------
+# PRINCIPAL BUCKET (IMPORTANT)
+# -------------------------------------------------
+df["principal_bucket"] = pd.cut(
+    df["omrctradeBasecurrprincipalamt"],
+    bins=[0, 25e6, 100e6, np.inf],
+    labels=["Small", "Medium", "Large"]
+)
+
+# -------------------------------------------------
+# LIQUIDITY STRESS FLAG
+# -------------------------------------------------
+df["liquidity_stress"] = np.where(
+    (df["principal_bucket"] == "Large") &
+    (df["liquidity_window"].isin(["Asia", "Off-hours"])) &
+    (df["tenor_bucket"].isin(["Medium", "Long"])),
+    "High",
+    "Normal"
+)
+
+# -------------------------------------------------
+# PORTFOLIO CLUSTERING (BOOK + DAY + CCY)
+# -------------------------------------------------
+cluster_counts = (
+    df.groupby(["uctradeBookname", "trade_date", "omrctradeCcyPair"])
+      .size()
+      .reset_index(name="cluster_trade_count")
+)
+
+df = df.merge(
+    cluster_counts,
+    on=["uctradeBookname", "trade_date", "omrctradeCcyPair"],
+    how="left"
+)
+
+# -------------------------------------------------
+# INTENT INFERENCE (RULE-BASED, OMRC-SAFE)
+# -------------------------------------------------
+def infer_intent(row):
+    hedge = funding = portfolio = 0
+
+    if row["product_group"] == "FX Forward":
+        hedge += 2
+    if row["product_group"] == "FX Swap":
+        funding += 2
+    if row["principal_bucket"] == "Large":
+        hedge += 1
+        portfolio += 1
+    if row["liquidity_window"] in ["Asia", "Off-hours"]:
+        hedge += 1
+        funding += 1
+    if row["cluster_trade_count"] >= 3:
+        portfolio += 2
+    if row["tenor_bucket"] == "Long":
+        hedge += 1
+
+    total = hedge + funding + portfolio + 1e-6
+    return {
+        "Hedge": round(hedge / total, 2),
+        "Funding": round(funding / total, 2),
+        "Portfolio": round(portfolio / total, 2)
     }
-    df["product_group"] = df["trade_type"].map(PRODUCT_MAP)
 
-    # Keep Phase-1 scope only
-    df = df[df["product_group"].isin(["FX Forward", "FX Swap"])]
+df["intent_scores"] = df.apply(infer_intent, axis=1)
 
-    # -------------------------------
-    # TENOR BUCKETING (YOUR VALUES)
-    # -------------------------------
-    TENOR_BUCKETS = {
-        "ON": "Spot / Very Short",
-        "TN": "Spot / Very Short",
-        "SN": "Spot / Very Short",
-        "SPT": "Spot / Very Short",
-        "2W": "Short",
-        "3W": "Short",
-        "1M": "Short",
-        "2M": "Short",
-        "3M": "Short",
-        "4M": "Medium",
-        "5M": "Medium",
-        "6M": "Medium",
-        "7M": "Medium",
-        "8M": "Medium",
-        "9M": "Medium",
-        "10M": "Medium",
-        "11M": "Medium",
-        "18M": "Long",
-        "1Y": "Long",
-        "2Y": "Long",
-        "3Y": "Long",
-        "4Y": "Long"
-    }
-    df["tenor_bucket"] = df["tenor"].map(TENOR_BUCKETS).fillna("Other")
+# -------------------------------------------------
+# SIDEBAR FILTERS
+# -------------------------------------------------
+st.sidebar.header("Filters")
 
-    # -------------------------------
-    # LIQUIDITY WINDOW
-    # -------------------------------
-    def liquidity_window(ts):
-        h = ts.hour
-        if h < 6:
-            return "Asia"
-        elif h < 12:
-            return "London"
-        elif h < 17:
-            return "NY"
-        else:
-            return "Off-hours"
+ccy = st.sidebar.multiselect(
+    "Currency Pair",
+    options=df["omrctradeCcyPair"].unique(),
+    default=df["omrctradeCcyPair"].unique()
+)
 
-    df["liquidity_window"] = df["omrctradeTradedate"].apply(liquidity_window)
+product = st.sidebar.multiselect(
+    "Product Group",
+    options=df["product_group"].unique(),
+    default=df["product_group"].unique()
+)
 
-    # -------------------------------
-    # PRINCIPAL BUCKET
-    # -------------------------------
-    df["principal_bucket"] = pd.cut(
-        df["principal"],
-        bins=[0, 25e6, 100e6, np.inf],
-        labels=["Small", "Medium", "Large"]
-    )
+book = st.sidebar.multiselect(
+    "Book",
+    options=df["uctradeBookname"].dropna().unique(),
+    default=df["uctradeBookname"].dropna().unique()
+)
 
-    # -------------------------------
-    # LIQUIDITY STRESS FLAG
-    # -------------------------------
-    df["liquidity_stress"] = np.where(
-        (df["principal_bucket"] == "Large") &
-        (df["liquidity_window"].isin(["Asia", "Off-hours"])) &
-        (df["tenor_bucket"].isin(["Medium", "Long"])),
-        "High",
-        "Normal"
-    )
+fdf = df[
+    (df["omrctradeCcyPair"].isin(ccy)) &
+    (df["product_group"].isin(product)) &
+    (df["uctradeBookname"].isin(book))
+]
 
-    # -------------------------------
-    # INTENT INFERENCE (RULE-BASED)
-    # -------------------------------
-    def infer_intent(row):
-        hedge, funding, portfolio = 0, 0, 0
+# -------------------------------------------------
+# OVERVIEW TABLE
+# -------------------------------------------------
+st.subheader("📋 OMRC Alert Overview")
+st.dataframe(
+    fdf[
+        [
+            "exceptionId",
+            "omrctradeCcyPair",
+            "product_group",
+            "omrctradeTenor",
+            "tenor_bucket",
+            "principal_bucket",
+            "liquidity_window",
+            "liquidity_stress",
+            "cluster_trade_count"
+        ]
+    ],
+    use_container_width=True
+)
 
-        if row["product_group"] == "FX Forward":
-            hedge += 2
-        if row["product_group"] == "FX Swap":
-            funding += 2
-        if row["principal_bucket"] == "Large":
-            hedge += 1
-            portfolio += 1
-        if row["liquidity_window"] in ["Asia", "Off-hours"]:
-            hedge += 1
-            funding += 1
-        if row["tenor_bucket"] == "Long":
-            hedge += 1
+# -------------------------------------------------
+# PORTFOLIO CLUSTER VISUALS
+# -------------------------------------------------
+st.subheader("📈 Portfolio Activity (Book / Day / Currency)")
 
-        total = hedge + funding + portfolio + 1e-6
-        return {
-            "Hedge": round(hedge / total, 2),
-            "Funding": round(funding / total, 2),
-            "Portfolio": round(portfolio / total, 2)
-        }
+cluster_view = (
+    fdf.groupby(["trade_date", "uctradeBookname"])
+       .agg(
+           trades=("exceptionId", "count"),
+           avg_principal=("omrctradeBasecurrprincipalamt", "mean")
+       )
+       .reset_index()
+)
 
-    df["intent_scores"] = df.apply(infer_intent, axis=1)
+st.bar_chart(
+    cluster_view.set_index("trade_date")["trades"]
+)
 
-    # -------------------------------
-    # SIDEBAR FILTERS
-    # -------------------------------
-    st.sidebar.header("Filters")
-    ccy = st.sidebar.multiselect(
-        "Currency Pair",
-        options=df["currency_pair"].unique(),
-        default=df["currency_pair"].unique()
-    )
-    product = st.sidebar.multiselect(
-        "Product Group",
-        options=df["product_group"].unique(),
-        default=df["product_group"].unique()
-    )
+# -------------------------------------------------
+# TRADE DRILLDOWN
+# -------------------------------------------------
+st.subheader("🔍 Trade Drilldown")
 
-    fdf = df[(df["currency_pair"].isin(ccy)) & (df["product_group"].isin(product))]
+selected_id = st.selectbox(
+    "Select Exception ID",
+    fdf["exceptionId"].unique()
+)
 
-    # -------------------------------
-    # OVERVIEW TABLE
-    # -------------------------------
-    st.subheader("📋 OMRC Alert Overview")
-    st.dataframe(
-        fdf[[
-            "trade_id", "currency_pair", "product_group",
-            "principal", "tenor", "tenor_bucket",
-            "liquidity_window", "liquidity_stress"
-        ]],
-        use_container_width=True
-    )
+t = fdf[fdf["exceptionId"] == selected_id].iloc[0]
 
-    # -------------------------------
-    # DRILLDOWN
-    # -------------------------------
-    st.subheader("🔍 Trade Drilldown")
-    tid = st.selectbox("Select Trade ID", fdf["trade_id"].unique())
-    t = fdf[fdf["trade_id"] == tid].iloc[0]
+st.json({
+    "Currency Pair": t["omrctradeCcyPair"],
+    "Product": t["product_group"],
+    "Tenor": t["omrctradeTenor"],
+    "Tenor Bucket": t["tenor_bucket"],
+    "Principal Bucket": t["principal_bucket"],
+    "Liquidity Window": t["liquidity_window"],
+    "Liquidity Stress": t["liquidity_stress"],
+    "Same-Day Book Trades": int(t["cluster_trade_count"])
+})
 
-    st.json({
-        "Currency Pair": t["currency_pair"],
-        "Product": t["product_group"],
-        "Tenor": t["tenor"],
-        "Tenor Bucket": t["tenor_bucket"],
-        "Principal": t["principal"],
-        "Liquidity Window": t["liquidity_window"],
-        "Liquidity Stress": t["liquidity_stress"]
-    })
+st.markdown("### Intent Likelihood")
+st.bar_chart(pd.DataFrame(t["intent_scores"], index=["Score"]).T)
 
-    st.markdown("### Intent Likelihood")
-    st.bar_chart(pd.DataFrame(t["intent_scores"], index=["Score"]).T)
-
-    st.markdown("### OMRC Explanation (Auto-Draft)")
-    st.info(
-        f"""
-        The {t['product_group']} trade in {t['currency_pair']} with tenor {t['tenor']}
-        was executed during the {t['liquidity_window']} window.
-        Given the {t['tenor_bucket']} tenor and {t['principal_bucket']} principal size,
-        the observed execution context indicates {t['liquidity_stress']} liquidity stress.
-        The execution appears economically explainable and consistent with hedging,
-        funding, or portfolio management activity.
-        """
-    )
-
-else:
-    st.warning("Please upload an OMRC GFX dataset to proceed.")
+st.markdown("### OMRC Explanation (Auto-Draft)")
+st.info(
+    f"""
+    The {t['product_group']} trade in {t['omrctradeCcyPair']} with tenor {t['omrctradeTenor']}
+    was executed during the {t['liquidity_window']} window.
+    The trade involved a {t['principal_bucket']} principal size and formed part of
+    {int(t['cluster_trade_count'])} same-day trades in the same book and currency.
+    Given the execution timing, tenor profile, and portfolio activity,
+    the observed pricing deviation appears economically explainable
+    and consistent with non-abusive execution behavior.
+    """
+)
