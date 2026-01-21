@@ -17,13 +17,13 @@ st.caption(
 )
 
 # =========================================================
-# SIDEBAR – HISTORICAL DATA PREP
+# SIDEBAR – HISTORICAL DATA SETUP
 # =========================================================
 st.sidebar.header("📁 Historical Data Setup")
 
 hist_csv_path = st.sidebar.text_input(
     "Path to historical GFX CSV (week-level)",
-    placeholder="/data/omrc/gfx_history_week.csv"
+    placeholder="C:/data/gfx_history_week.csv"
 )
 
 PARQUET_DIR = Path("./parquet_cache")
@@ -43,11 +43,15 @@ if hist_csv_path:
             st.sidebar.success("Cached Parquet found.")
         else:
             with st.sidebar.spinner("Converting historical CSV → Parquet (one-time)..."):
-                hist_df = pl.scan_csv(hist_csv_path, infer_schema_length=10000).collect()
-                hist_df.write_parquet(hist_parquet_path)
+                hist_df_tmp = pl.scan_csv(
+                    hist_csv_path,
+                    infer_schema_length=10000
+                ).collect()
+                hist_df_tmp.write_parquet(hist_parquet_path)
             st.sidebar.success("Historical data converted to Parquet.")
 
-if not hist_parquet_path:
+if not hist_parquet_path or not hist_parquet_path.exists():
+    st.warning("Provide valid historical CSV path to proceed.")
     st.stop()
 
 hist_df = pl.read_parquet(hist_parquet_path)
@@ -68,29 +72,52 @@ if not latest_file:
 if latest_file.name.endswith(".parquet"):
     df = pl.read_parquet(latest_file)
 else:
-    df = pl.scan_csv(latest_file, infer_schema_length=10000).collect()
+    df = pl.scan_csv(
+        latest_file,
+        infer_schema_length=10000
+    ).collect()
 
 # =========================================================
-# NORMALISATION
+# NORMALISATION WITH ROBUST DATE FALLBACK
 # =========================================================
+def parse_trade_timestamp(df: pl.DataFrame) -> pl.Expr:
+    """
+    Robust date parsing:
+    1) Try trade_date in multiple formats
+    2) Fallback to business_date
+    """
+    trade_date_parsed = pl.coalesce([
+        pl.col("trade_date").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False),
+        pl.col("trade_date").str.strptime(pl.Datetime, "%Y-%m-%d", strict=False),
+        pl.col("trade_date").str.strptime(pl.Datetime, "%d-%b-%Y", strict=False),
+        pl.col("trade_date").str.strptime(pl.Datetime, "%Y%m%d", strict=False)
+    ])
+
+    business_date_parsed = pl.coalesce([
+        pl.col("business_date").str.strptime(pl.Datetime, "%Y-%m-%d", strict=False),
+        pl.col("business_date").str.strptime(pl.Datetime, "%Y%m%d", strict=False)
+    ])
+
+    return pl.coalesce([trade_date_parsed, business_date_parsed]).alias("trade_ts")
+
+
 def normalise(df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns([
-        pl.col("trade_date")
-          .str.strptime(pl.Datetime, strict=False)
-          .alias("trade_ts"),
+        parse_trade_timestamp(df),
         (pl.col("base_currency_cd") + "/" + pl.col("orig_currency_cd"))
-          .alias("ccy_pair"),
+            .alias("ccy_pair")
     ])
 
     df = df.with_columns([
         pl.col("trade_ts").dt.date().alias("trade_date_only"),
-        pl.col("tenor").fill_null("UNKNOWN"),
+
         pl.when(pl.col("base_currency_prin_amount") < 25_000_000)
           .then("Small")
           .when(pl.col("base_currency_prin_amount") < 100_000_000)
           .then("Medium")
           .otherwise("Large")
           .alias("principal_bucket"),
+
         pl.col("bui_value")
           .cast(pl.Utf8)
           .str.to_uppercase()
@@ -100,31 +127,55 @@ def normalise(df: pl.DataFrame) -> pl.DataFrame:
 
     return df
 
+
 df = normalise(df)
 hist_df = normalise(hist_df)
+
+# =========================================================
+# DATA QUALITY WARNING (AUDIT SAFE)
+# =========================================================
+invalid_dates = df.filter(pl.col("trade_ts").is_null()).height
+if invalid_dates > 0:
+    st.warning(
+        f"{invalid_dates} trades have unparseable trade_date and business_date values. "
+        "They are retained but excluded from date-based comparisons."
+    )
 
 # =========================================================
 # PORTFOLIO CLUSTERING (TODAY)
 # =========================================================
 cluster_df = (
-    df.groupby(["book", "trade_date_only", "ccy_pair"])
+    df.filter(pl.col("trade_date_only").is_not_null())
+      .groupby(["book", "trade_date_only", "ccy_pair"])
       .count()
       .rename({"count": "same_day_book_trades"})
 )
 
 df = df.join(
     cluster_df,
-    on=["book", "trade_date_only", "ccy_pair"]
+    on=["book", "trade_date_only", "ccy_pair"],
+    how="left"
+)
+
+df = df.with_columns(
+    pl.col("same_day_book_trades").fill_null(1)
 )
 
 # =========================================================
 # HISTORICAL BASELINE (LAST 5 BUSINESS DAYS)
 # =========================================================
-max_date = df.select(pl.col("trade_date_only").max()).item()
+valid_today_dates = df.filter(pl.col("trade_date_only").is_not_null())
+
+if valid_today_dates.height == 0:
+    st.error("No valid trade dates available for baseline comparison.")
+    st.stop()
+
+max_date = valid_today_dates.select(pl.col("trade_date_only").max()).item()
 baseline_start = max_date - timedelta(days=5)
 
 baseline = (
-    hist_df.filter(pl.col("trade_date_only") < max_date)
+    hist_df.filter(pl.col("trade_date_only").is_not_null())
+           .filter(pl.col("trade_date_only") < max_date)
            .filter(pl.col("trade_date_only") >= baseline_start)
            .groupby(["book", "ccy_pair"])
            .agg(
@@ -141,10 +192,13 @@ df = df.join(
 )
 
 df = df.with_columns(
-    pl.when(pl.col("base_currency_prin_amount") > pl.col("hist_median_principal"))
-      .then("Higher than recent executions")
-      .otherwise("In line with recent executions")
-      .alias("historical_size_context")
+    pl.when(
+        (pl.col("hist_median_principal").is_not_null()) &
+        (pl.col("base_currency_prin_amount") > pl.col("hist_median_principal"))
+    )
+    .then("Higher than recent executions")
+    .otherwise("In line with recent executions")
+    .alias("historical_size_context")
 )
 
 # =========================================================
@@ -198,19 +252,25 @@ trade_dict = dict(zip(df.columns, trade))
 # =========================================================
 st.subheader("📝 Execution Context Summary")
 
-def explain_trade(t):
+def explain_trade(t: dict):
     lines = []
 
-    lines.append(f"Trade executed in book '{t['book']}' for currency pair {t['ccy_pair']}.")
+    lines.append(
+        f"Trade executed in book '{t['book']}' for currency pair {t['ccy_pair']}."
+    )
 
-    lines.append(f"Trade size falls into the '{t['principal_bucket']}' principal category.")
+    lines.append(
+        f"Trade size falls into the '{t['principal_bucket']}' principal category."
+    )
 
     if t["same_day_book_trades"] > 1:
         lines.append(
             "Multiple trades were observed in the same book and currency on the same business date."
         )
 
-    lines.append(t["historical_size_context"] + " for this book and currency.")
+    lines.append(
+        t["historical_size_context"] + " for this book and currency."
+    )
 
     if t["btb_flag"]:
         lines.append(
@@ -228,11 +288,12 @@ def explain_trade(t):
 
     return lines
 
-for l in explain_trade(trade_dict):
-    st.write("•", l)
+
+for line in explain_trade(trade_dict):
+    st.write("•", line)
 
 # =========================================================
-# RAW VIEW (AUDIT FRIENDLY)
+# RAW VIEW (AUDIT / OPS)
 # =========================================================
 with st.expander("🔎 View Full Trade Record (Audit / Ops)"):
     st.json(trade_dict)
