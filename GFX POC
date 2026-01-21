@@ -2,79 +2,119 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="OMRC GFX Phase-1 POC", layout="wide")
+st.set_page_config(page_title="OMRC GFX Phase-1", layout="wide")
 
 st.title("📊 OMRC – GFX Phase-1 Execution Context Dashboard")
-st.caption("Scope: FXF / FXS | Purpose: Execution explainability (NOT linkage)")
+st.caption("Scope: FX Forwards & FX Swaps | Purpose: Execution explainability (OMRC)")
 
-# ---------------------------
-# Load Data
-# ---------------------------
-uploaded_file = st.file_uploader("Upload GFX OMRC Alert File", type=["csv"])
+# -------------------------------
+# Upload Data
+# -------------------------------
+file = st.file_uploader("Upload OMRC GFX dataset", type=["csv"])
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file, parse_dates=["trade_time"])
+if file:
+    df = pd.read_csv(file)
+    df["omrctradeTradedate"] = pd.to_datetime(df["omrctradeTradedate"])
 
-    # ---------------------------
-    # Feature Engineering
-    # ---------------------------
+    # -------------------------------
+    # PRODUCT NORMALIZATION
+    # -------------------------------
+    PRODUCT_MAP = {
+        "FXF": "FX Forward",
+        "FWD": "FX Forward",
+        "FXFO": "FX Forward",
+        "FXS": "FX Swap",
+        "SPOT": "FX Spot",
+        "SPT": "FX Spot"
+    }
+    df["product_group"] = df["trade_type"].map(PRODUCT_MAP)
+
+    # Keep Phase-1 scope only
+    df = df[df["product_group"].isin(["FX Forward", "FX Swap"])]
+
+    # -------------------------------
+    # TENOR BUCKETING (YOUR VALUES)
+    # -------------------------------
+    TENOR_BUCKETS = {
+        "ON": "Spot / Very Short",
+        "TN": "Spot / Very Short",
+        "SN": "Spot / Very Short",
+        "SPT": "Spot / Very Short",
+        "2W": "Short",
+        "3W": "Short",
+        "1M": "Short",
+        "2M": "Short",
+        "3M": "Short",
+        "4M": "Medium",
+        "5M": "Medium",
+        "6M": "Medium",
+        "7M": "Medium",
+        "8M": "Medium",
+        "9M": "Medium",
+        "10M": "Medium",
+        "11M": "Medium",
+        "18M": "Long",
+        "1Y": "Long",
+        "2Y": "Long",
+        "3Y": "Long",
+        "4Y": "Long"
+    }
+    df["tenor_bucket"] = df["tenor"].map(TENOR_BUCKETS).fillna("Other")
+
+    # -------------------------------
+    # LIQUIDITY WINDOW
+    # -------------------------------
     def liquidity_window(ts):
         h = ts.hour
-        if 0 <= h < 6:
+        if h < 6:
             return "Asia"
-        elif 6 <= h < 12:
+        elif h < 12:
             return "London"
-        elif 12 <= h < 18:
+        elif h < 17:
             return "NY"
         else:
-            return "Off-Hours"
+            return "Off-hours"
 
-    df["liquidity_window"] = df["trade_time"].apply(liquidity_window)
+    df["liquidity_window"] = df["omrctradeTradedate"].apply(liquidity_window)
 
+    # -------------------------------
+    # PRINCIPAL BUCKET
+    # -------------------------------
     df["principal_bucket"] = pd.cut(
         df["principal"],
         bins=[0, 25e6, 100e6, np.inf],
         labels=["Small", "Medium", "Large"]
     )
 
-    df["tenor_bucket"] = df["tenor"].replace({
-        "ON": "Short",
-        "TN": "Short",
-        "SN": "Short",
-        "1M": "Short",
-        "3M": "Medium",
-        "6M": "Medium",
-        "1Y": "Long"
-    }).fillna("Long")
-
-    # ---------------------------
-    # Liquidity Stress Flag
-    # ---------------------------
+    # -------------------------------
+    # LIQUIDITY STRESS FLAG
+    # -------------------------------
     df["liquidity_stress"] = np.where(
         (df["principal_bucket"] == "Large") &
-        (df["liquidity_window"].isin(["Asia", "Off-Hours"])),
+        (df["liquidity_window"].isin(["Asia", "Off-hours"])) &
+        (df["tenor_bucket"].isin(["Medium", "Long"])),
         "High",
         "Normal"
     )
 
-    # ---------------------------
-    # Intent Inference (Rule-based, Phase-1)
-    # ---------------------------
+    # -------------------------------
+    # INTENT INFERENCE (RULE-BASED)
+    # -------------------------------
     def infer_intent(row):
-        hedge = 0
-        funding = 0
-        portfolio = 0
+        hedge, funding, portfolio = 0, 0, 0
 
-        if row["trade_type"] == "FXF":
+        if row["product_group"] == "FX Forward":
             hedge += 2
-        if row["trade_type"] == "FXS":
+        if row["product_group"] == "FX Swap":
             funding += 2
         if row["principal_bucket"] == "Large":
             hedge += 1
             portfolio += 1
-        if row["liquidity_window"] in ["Asia", "Off-Hours"]:
+        if row["liquidity_window"] in ["Asia", "Off-hours"]:
             hedge += 1
             funding += 1
+        if row["tenor_bucket"] == "Long":
+            hedge += 1
 
         total = hedge + funding + portfolio + 1e-6
         return {
@@ -85,79 +125,67 @@ if uploaded_file:
 
     df["intent_scores"] = df.apply(infer_intent, axis=1)
 
-    # ---------------------------
-    # Dashboard Filters
-    # ---------------------------
+    # -------------------------------
+    # SIDEBAR FILTERS
+    # -------------------------------
     st.sidebar.header("Filters")
     ccy = st.sidebar.multiselect(
         "Currency Pair",
         options=df["currency_pair"].unique(),
         default=df["currency_pair"].unique()
     )
-
-    trade_type = st.sidebar.multiselect(
-        "Trade Type",
-        options=df["trade_type"].unique(),
-        default=df["trade_type"].unique()
+    product = st.sidebar.multiselect(
+        "Product Group",
+        options=df["product_group"].unique(),
+        default=df["product_group"].unique()
     )
 
-    filtered_df = df[
-        (df["currency_pair"].isin(ccy)) &
-        (df["trade_type"].isin(trade_type))
-    ]
+    fdf = df[(df["currency_pair"].isin(ccy)) & (df["product_group"].isin(product))]
 
-    # ---------------------------
-    # Main Table
-    # ---------------------------
+    # -------------------------------
+    # OVERVIEW TABLE
+    # -------------------------------
     st.subheader("📋 OMRC Alert Overview")
     st.dataframe(
-        filtered_df[[
-            "trade_id",
-            "currency_pair",
-            "trade_type",
-            "principal",
-            "tenor",
-            "liquidity_window",
-            "liquidity_stress"
+        fdf[[
+            "trade_id", "currency_pair", "product_group",
+            "principal", "tenor", "tenor_bucket",
+            "liquidity_window", "liquidity_stress"
         ]],
         use_container_width=True
     )
 
-    # ---------------------------
-    # Trade Drilldown
-    # ---------------------------
+    # -------------------------------
+    # DRILLDOWN
+    # -------------------------------
     st.subheader("🔍 Trade Drilldown")
+    tid = st.selectbox("Select Trade ID", fdf["trade_id"].unique())
+    t = fdf[fdf["trade_id"] == tid].iloc[0]
 
-    selected_trade = st.selectbox(
-        "Select Trade ID",
-        filtered_df["trade_id"].unique()
-    )
-
-    trade = filtered_df[filtered_df["trade_id"] == selected_trade].iloc[0]
-
-    st.markdown("### Execution Context")
     st.json({
-        "Currency Pair": trade["currency_pair"],
-        "Trade Type": trade["trade_type"],
-        "Principal": trade["principal"],
-        "Tenor": trade["tenor"],
-        "Liquidity Window": trade["liquidity_window"],
-        "Liquidity Stress": trade["liquidity_stress"]
+        "Currency Pair": t["currency_pair"],
+        "Product": t["product_group"],
+        "Tenor": t["tenor"],
+        "Tenor Bucket": t["tenor_bucket"],
+        "Principal": t["principal"],
+        "Liquidity Window": t["liquidity_window"],
+        "Liquidity Stress": t["liquidity_stress"]
     })
 
     st.markdown("### Intent Likelihood")
-    st.bar_chart(pd.DataFrame(trade["intent_scores"], index=["Probability"]).T)
+    st.bar_chart(pd.DataFrame(t["intent_scores"], index=["Score"]).T)
 
     st.markdown("### OMRC Explanation (Auto-Draft)")
     st.info(
         f"""
-        The FX {trade['trade_type']} trade in {trade['currency_pair']} was executed
-        with a principal of {int(trade['principal']/1e6)}m during the {trade['liquidity_window']} window.
-        The observed execution context indicates {trade['liquidity_stress']} liquidity stress.
-        Based on size, timing, and instrument type, the trade is likely associated with
-        hedging, funding, or portfolio management activity rather than abusive execution.
+        The {t['product_group']} trade in {t['currency_pair']} with tenor {t['tenor']}
+        was executed during the {t['liquidity_window']} window.
+        Given the {t['tenor_bucket']} tenor and {t['principal_bucket']} principal size,
+        the observed execution context indicates {t['liquidity_stress']} liquidity stress.
+        The execution appears economically explainable and consistent with hedging,
+        funding, or portfolio management activity.
         """
     )
 
 else:
-    st.warning("Upload a GFX OMRC alert file to begin.")
+    st.warning("Please upload an OMRC GFX dataset to proceed.")
