@@ -1,20 +1,72 @@
 import streamlit as st
 import polars as pl
+from pathlib import Path
 
-st.set_page_config(page_title="OMRC – Alert False Positive Analyzer", layout="wide")
+# =====================================================
+# PAGE CONFIG
+# =====================================================
+st.set_page_config(
+    page_title="OMRC – Alert False Positive Evidence",
+    layout="wide"
+)
 
 st.title("OMRC – Alert False Positive Evidence Platform")
-st.caption("Rule-engine aware | Peer-based | Closure-ready")
+st.caption("Large-data safe | Rule-engine aware | Ops-ready")
 
-# --------------------------------------------------
-# HELPERS
-# --------------------------------------------------
-def load_file(uploaded_file):
-    if uploaded_file.name.endswith(".parquet"):
-        return pl.read_parquet(uploaded_file)
-    return pl.read_csv(uploaded_file, infer_schema_length=10000)
+# =====================================================
+# CONFIG
+# =====================================================
+DATA_DIR = Path("./parquet_cache")
+DATA_DIR.mkdir(exist_ok=True)
 
-def compute_deviation(df):
+REQUIRED_COLS = [
+    "trade_id",
+    "ccy_pair",
+    "book",
+    "product",
+    "trade_type",
+    "alert_description",
+    "market_rate",
+    "quoted_market_rate",
+    "quoted_eod_rate",
+    "base_threshold_percent",
+    "orig_threshold_percent",
+    "deviation_percent",
+    "market_rate_source",
+    "originating_system",
+    "bui_value",
+    "back_to_back_book",
+    "risk_book",
+]
+
+# =====================================================
+# UTILS
+# =====================================================
+def convert_csv_to_parquet(csv_path: Path) -> Path:
+    parquet_path = DATA_DIR / f"{csv_path.stem}.parquet"
+
+    if parquet_path.exists():
+        return parquet_path
+
+    with st.spinner("Converting CSV → Parquet (one-time)…"):
+        df = pl.scan_csv(csv_path, infer_schema_length=10000)
+        df.collect().write_parquet(parquet_path)
+
+    return parquet_path
+
+
+def load_parquet(path: Path) -> pl.DataFrame:
+    return pl.read_parquet(path)
+
+
+def ensure_columns(df: pl.DataFrame) -> pl.DataFrame:
+    for c in REQUIRED_COLS:
+        if c not in df.columns:
+            df = df.with_columns(pl.lit(None).alias(c))
+    return df
+
+
+def compute_deviation(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(
         pl.when(pl.col("deviation_percent").is_null())
         .then(
@@ -25,70 +77,79 @@ def compute_deviation(df):
         .alias("computed_deviation_percent")
     )
 
-# --------------------------------------------------
-# FILE UPLOAD
-# --------------------------------------------------
-uploaded_file = st.file_uploader(
-    "Upload GFX Rule Engine Output (CSV / Parquet)",
-    type=["csv", "parquet"]
+
+def btb_flag(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns(
+        pl.when(
+            (pl.col("bui_value") == "BTB") |
+            (pl.col("back_to_back_book") != pl.col("risk_book"))
+        )
+        .then(pl.lit("YES"))
+        .otherwise(pl.lit("NO"))
+        .alias("is_btb_trade")
+    )
+
+# =====================================================
+# STEP 1 – CSV PATH INPUT
+# =====================================================
+st.header("1️⃣ Provide Rule-Engine Output File Path")
+
+csv_path_input = st.text_input(
+    "Enter FULL path to GFX rule-engine CSV file",
+    placeholder="C:/data/GFX_RULE_ENGINE_20260116.csv"
 )
 
-if not uploaded_file:
+if not csv_path_input:
     st.stop()
 
-with st.spinner("Loading dataset..."):
-    df = load_file(uploaded_file)
+csv_path = Path(csv_path_input)
+
+if not csv_path.exists():
+    st.error("File path does not exist")
+    st.stop()
+
+# =====================================================
+# STEP 2 – CONVERT TO PARQUET (ONCE)
+# =====================================================
+parquet_path = convert_csv_to_parquet(csv_path)
+
+st.success(f"Using Parquet file: {parquet_path}")
+
+# =====================================================
+# STEP 3 – LOAD PARQUET
+# =====================================================
+with st.spinner("Loading Parquet data…"):
+    df = load_parquet(parquet_path)
 
 st.success(f"Loaded {df.height:,} trades")
 
-# --------------------------------------------------
-# BASIC VALIDATION
-# --------------------------------------------------
-required_cols = [
-    "trade_id",
-    "ccy_pair",
-    "book",
-    "product",
-    "trade_type",
-    "alert_description",
-    "market_rate",
-    "quoted_market_rate",
-    "base_threshold_percent",
-    "deviation_percent",
-]
+df = ensure_columns(df)
 
-missing = [c for c in required_cols if c not in df.columns]
-if missing:
-    st.error(f"Missing required columns: {missing}")
-    st.stop()
-
-# --------------------------------------------------
-# DERIVED METRICS
-# --------------------------------------------------
-df = compute_deviation(df)
-
-df = df.with_columns(
-    (pl.col("computed_deviation_percent") - pl.col("base_threshold_percent"))
-    .alias("breach_amount_percent")
-)
-
-# --------------------------------------------------
-# SPLIT ALERT / NON-ALERT
-# --------------------------------------------------
+# =====================================================
+# STEP 4 – ALERT / NON-ALERT SPLIT
+# =====================================================
 alerts_df = df.filter(pl.col("alert_description").is_not_null())
 clean_df = df.filter(pl.col("alert_description").is_null())
 
-st.metric("Total Alerts", alerts_df.height)
-st.metric("Valid Trades (Control Group)", clean_df.height)
+st.metric("Total Trades", df.height)
+st.metric("Alerted Trades", alerts_df.height)
+st.metric("Non-Alert Trades (Control)", clean_df.height)
 
-# --------------------------------------------------
-# PEER GROUP DEFINITION
-# --------------------------------------------------
+# =====================================================
+# STEP 5 – COMPUTE DEVIATIONS
+# =====================================================
+df = compute_deviation(df)
+
+alerts_df = compute_deviation(alerts_df)
+clean_df = compute_deviation(clean_df)
+
+alerts_df = btb_flag(alerts_df)
+
+# =====================================================
+# STEP 6 – PEER GROUP STATS (NON-ALERTS ONLY)
+# =====================================================
 peer_keys = ["ccy_pair", "book", "product", "trade_type"]
 
-# --------------------------------------------------
-# PEER STATISTICS (NON-ALERT TRADES)
-# --------------------------------------------------
 peer_stats = (
     clean_df
     .group_by(peer_keys)
@@ -99,52 +160,47 @@ peer_stats = (
     ])
 )
 
-# --------------------------------------------------
-# ENRICH ALERTS WITH PEER EVIDENCE
-# --------------------------------------------------
+# =====================================================
+# STEP 7 – ENRICH ALERTS WITH PEER EVIDENCE
+# =====================================================
 alerts_enriched = alerts_df.join(
     peer_stats,
     on=peer_keys,
     how="left"
 )
 
-# --------------------------------------------------
-# BTB FLAG
-# --------------------------------------------------
 alerts_enriched = alerts_enriched.with_columns(
-    pl.when(
-        (pl.col("bui_value") == "BTB") |
-        (pl.col("back_to_back_book") != pl.col("risk_book"))
-    )
-    .then(pl.lit("YES"))
-    .otherwise(pl.lit("NO"))
-    .alias("is_btb_trade")
+    (pl.col("computed_deviation_percent") - pl.col("base_threshold_percent"))
+    .alias("breach_amount_percent")
 )
 
-# --------------------------------------------------
-# CLOSURE EXPLANATION (STRICT TEMPLATE)
-# --------------------------------------------------
+# =====================================================
+# STEP 8 – CLOSURE-READY EXPLANATION
+# =====================================================
 alerts_enriched = alerts_enriched.with_columns(
     (
-        pl.lit("Alert: ")
+        pl.lit("Rule breach: ")
         + pl.col("alert_description")
-        + pl.lit(" | Observed deviation: ")
+        + pl.lit(" | Deviation: ")
         + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
-        + pl.lit("% vs Threshold: ")
+        + pl.lit("% (Threshold: ")
         + pl.col("base_threshold_percent").cast(pl.Utf8)
-        + pl.lit("% | Peer median (non-alert): ")
+        + pl.lit("%)")
+        + pl.lit(" | Peer median (non-alert): ")
         + pl.col("peer_median_dev").round(2).cast(pl.Utf8)
-        + pl.lit("% | Similar non-alert trades: ")
+        + pl.lit("% | Peer trades: ")
         + pl.col("peer_trade_count").cast(pl.Utf8)
         + pl.lit(" | BTB: ")
         + pl.col("is_btb_trade")
+        + pl.lit(" | Market source: ")
+        + pl.col("market_rate_source").cast(pl.Utf8)
     ).alias("closure_evidence")
 )
 
-# --------------------------------------------------
-# DISPLAY
-# --------------------------------------------------
-st.subheader("Alert-level False Positive Evidence")
+# =====================================================
+# STEP 9 – DISPLAY
+# =====================================================
+st.header("2️⃣ Alert-Level False-Positive Evidence")
 
 display_cols = [
     "trade_id",
@@ -156,7 +212,7 @@ display_cols = [
     "peer_75pct_dev",
     "peer_trade_count",
     "is_btb_trade",
-    "closure_evidence"
+    "closure_evidence",
 ]
 
 st.dataframe(
@@ -164,10 +220,10 @@ st.dataframe(
     use_container_width=True
 )
 
-# --------------------------------------------------
-# RULE-LEVEL SUMMARY
-# --------------------------------------------------
-st.subheader("Rule-wise Alert Context")
+# =====================================================
+# STEP 10 – RULE SUMMARY
+# =====================================================
+st.header("3️⃣ Rule-wise Context")
 
 rule_summary = (
     alerts_enriched
@@ -182,14 +238,14 @@ rule_summary = (
 
 st.dataframe(rule_summary, use_container_width=True)
 
-# --------------------------------------------------
-# DOWNLOAD
-# --------------------------------------------------
+# =====================================================
+# STEP 11 – EXPORT
+# =====================================================
 st.download_button(
-    "Download Alert Evidence (CSV)",
+    "Download Closure Evidence (CSV)",
     alerts_enriched.select(display_cols).write_csv(),
-    file_name="omrc_alert_false_positive_evidence.csv",
+    file_name="omrc_false_positive_evidence.csv",
     mime="text/csv"
 )
 
-st.success("Alert false-positive analysis completed")
+st.success("OMRC false-positive analysis completed successfully")
