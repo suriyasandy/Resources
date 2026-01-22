@@ -8,12 +8,14 @@ from sklearn.preprocessing import StandardScaler
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="OMRC – Closure Evidence Platform",
+    page_title="OMRC – FX Price Deviation Closure Platform",
     layout="wide"
 )
 
-st.title("OMRC – Alert False Positive & Closure Evidence")
-st.caption("Passed-trade peers | Same-day priority | Desk = BUI | ML for grouping only")
+st.title("OMRC – Price / PnL Deviation Closure Evidence")
+st.caption(
+    "Passed-trade peers | Time-window aware | Desk = BUI | ML for grouping only"
+)
 
 # =====================================================
 # CONFIG
@@ -24,6 +26,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 DATE_FORMAT = "%d/%m/%Y %H:%M:%S%.f"
 MIN_PEERS = 5
 MAX_PEER_TRADE_IDS = 3
+TIME_WINDOW_MINUTES = 5
 
 REQUIRED_COLS = [
     "trade_id",
@@ -53,14 +56,14 @@ def convert_csv_to_parquet(csv_path: Path) -> Path:
     return pq
 
 
-def ensure_columns(df: pl.DataFrame) -> pl.DataFrame:
+def ensure_columns(df):
     for c in REQUIRED_COLS:
         if c not in df.columns:
             df = df.with_columns(pl.lit(None).alias(c))
     return df
 
 
-def parse_trade_date(df: pl.DataFrame) -> pl.DataFrame:
+def parse_trade_date(df):
     return (
         df.with_columns(
             pl.col("trade_date")
@@ -68,13 +71,11 @@ def parse_trade_date(df: pl.DataFrame) -> pl.DataFrame:
             .str.strptime(pl.Datetime, DATE_FORMAT, strict=False)
             .alias("trade_datetime")
         )
-        .with_columns(
-            pl.col("trade_datetime").dt.date().alias("trade_date_only")
-        )
+        .with_columns(pl.col("trade_datetime").dt.date().alias("trade_date_only"))
     )
 
 
-def compute_deviation(df: pl.DataFrame) -> pl.DataFrame:
+def compute_deviation(df):
     return df.with_columns(
         pl.when(pl.col("deviation_percent").is_null())
         .then(
@@ -86,7 +87,7 @@ def compute_deviation(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def add_btb_flag(df: pl.DataFrame) -> pl.DataFrame:
+def add_btb_flag(df):
     return df.with_columns(
         pl.when(
             (pl.col("bui_value") == "BTB") |
@@ -132,9 +133,6 @@ st.success(f"Loaded {df.height:,} trades")
 alerts_df = df.filter(pl.col("alert_description").is_not_null())
 passed_df = df.filter(pl.col("alert_description").is_null())
 
-st.metric("Alert Trades", alerts_df.height)
-st.metric("Passed Trades (Peer Reference)", passed_df.height)
-
 # =====================================================
 # FEATURE ENGINEERING
 # =====================================================
@@ -149,12 +147,33 @@ alerts_df = alerts_df.with_columns(
 passed_df = compute_deviation(passed_df)
 
 # =====================================================
-# PEER KEYS (DESK = BUI)
+# PEER KEYS
 # =====================================================
 peer_keys = ["ccy_pair", "product", "trade_type", "bui_value"]
 
 # =====================================================
-# SAME-DAY PEERS (PASSED ONLY)
+# TIME-WINDOW PEERS (PASSED TRADES)
+# =====================================================
+passed_df = passed_df.with_columns(
+    pl.col("trade_datetime").dt.truncate("5m").alias("time_bucket")
+)
+
+alerts_df = alerts_df.with_columns(
+    pl.col("trade_datetime").dt.truncate("5m").alias("time_bucket")
+)
+
+time_peers = (
+    passed_df
+    .group_by(peer_keys + ["trade_date_only", "time_bucket"])
+    .agg([
+        pl.median("computed_deviation_percent").alias("tw_peer_median_dev"),
+        pl.count().alias("tw_peer_trade_count"),
+        pl.col("trade_id").head(MAX_PEER_TRADE_IDS).alias("tw_peer_trade_ids")
+    ])
+)
+
+# =====================================================
+# SAME-DAY PEERS
 # =====================================================
 same_day_peers = (
     passed_df
@@ -167,7 +186,7 @@ same_day_peers = (
 )
 
 # =====================================================
-# HISTORICAL PEERS (PASSED ONLY)
+# HISTORICAL PEERS
 # =====================================================
 hist_peers = (
     passed_df
@@ -180,47 +199,50 @@ hist_peers = (
 )
 
 # =====================================================
-# JOIN PEERS
+# JOIN ALL PEERS
 # =====================================================
 alerts_df = alerts_df.join(
+    time_peers,
+    on=peer_keys + ["trade_date_only", "time_bucket"],
+    how="left"
+).join(
     same_day_peers,
     on=peer_keys + ["trade_date_only"],
     how="left"
-)
-
-alerts_df = alerts_df.join(
+).join(
     hist_peers,
     on=peer_keys,
     how="left"
 )
 
 # =====================================================
-# SELECT PEER REFERENCE (SAFE)
+# SELECT BEST PEER REFERENCE
 # =====================================================
 alerts_df = alerts_df.with_columns([
-    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
+    pl.when(pl.col("tw_peer_trade_count") >= MIN_PEERS)
+    .then(pl.col("tw_peer_median_dev"))
+    .when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.col("sd_peer_median_dev"))
     .otherwise(pl.col("hist_peer_median_dev"))
     .alias("peer_median_dev"),
 
-    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
-    .then(pl.col("sd_peer_trade_count"))
-    .otherwise(pl.col("hist_peer_trade_count"))
-    .alias("peer_trade_count"),
-
-    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
+    pl.when(pl.col("tw_peer_trade_count") >= MIN_PEERS)
+    .then(pl.col("tw_peer_trade_ids"))
+    .when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.col("sd_peer_trade_ids"))
     .otherwise(pl.col("hist_peer_trade_ids"))
     .alias("peer_trade_ids"),
 
-    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
+    pl.when(pl.col("tw_peer_trade_count") >= MIN_PEERS)
+    .then(pl.lit("TIME_WINDOW"))
+    .when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.lit("SAME_DAY"))
     .otherwise(pl.lit("HISTORICAL"))
     .alias("peer_reference_type")
 ])
 
 # =====================================================
-# FLATTEN PEER IDS (CSV SAFE)
+# FLATTEN PEER IDS
 # =====================================================
 alerts_df = alerts_df.with_columns(
     pl.when(pl.col("peer_trade_ids").is_null())
@@ -230,12 +252,11 @@ alerts_df = alerts_df.with_columns(
 )
 
 # =====================================================
-# FALSE POSITIVE HEURISTIC (EVIDENCE ONLY)
+# FALSE POSITIVE INDICATOR
 # =====================================================
 alerts_df = alerts_df.with_columns(
     pl.when(
-        (pl.col("peer_trade_count") >= MIN_PEERS) &
-        (pl.col("computed_deviation_percent") <= pl.col("peer_median_dev") * 1.2)
+        pl.col("computed_deviation_percent") <= pl.col("peer_median_dev") * 1.2
     )
     .then(pl.lit(1))
     .otherwise(pl.lit(0))
@@ -243,119 +264,61 @@ alerts_df = alerts_df.with_columns(
 )
 
 # =====================================================
-# CLOSURE EVIDENCE (FINAL)
+# CLOSURE EVIDENCE
 # =====================================================
 alerts_df = alerts_df.with_columns(
     (
-        pl.lit("Rule: ")
-        + pl.col("alert_description")
-        + pl.lit(" | Deviation: ")
-        + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
-        + pl.lit("% vs Threshold: ")
-        + pl.col("base_threshold_percent").cast(pl.Utf8)
-        + pl.lit("% | Peer median (")
+        pl.lit("Price deviation is consistent with ")
         + pl.col("peer_reference_type")
-        + pl.lit("): ")
-        + pl.col("peer_median_dev").round(2).cast(pl.Utf8)
-        + pl.lit("% | Example peer trade_ids: ")
+        + pl.lit(" peer executions. Example peer trade IDs: ")
         + pl.col("peer_trade_ids_str")
-        + pl.lit(" | Desk (BUI): ")
+        + pl.lit(". Deviation observed: ")
+        + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
+        + pl.lit("% vs threshold ")
+        + pl.col("base_threshold_percent").cast(pl.Utf8)
+        + pl.lit("%. Desk (BUI): ")
         + pl.col("bui_value")
-        + pl.lit(" | BTB: ")
-        + pl.col("is_btb_trade").cast(pl.Utf8)
     ).alias("closure_evidence")
 )
 
 # =====================================================
-# DESK-LEVEL FALSE POSITIVE RATE (BUI)
+# ML CLUSTERING (SIMILARITY ONLY)
 # =====================================================
-st.header("2️⃣ Desk-level False Positive Rates")
-
-desk_fp = (
-    alerts_df
-    .group_by("bui_value")
-    .agg([
-        pl.count().alias("total_alerts"),
-        pl.sum("fp_like_flag").alias("fp_like_alerts")
-    ])
-    .with_columns(
-        (pl.col("fp_like_alerts") / pl.col("total_alerts") * 100)
-        .round(2)
-        .alias("fp_rate_percent")
-    )
-    .sort("fp_rate_percent", descending=True)
-)
-
-st.dataframe(desk_fp, use_container_width=True)
-
-# =====================================================
-# ML CLUSTERING (SHAPE + CSV SAFE)
-# =====================================================
-st.header("3️⃣ Alert Clustering (Similarity Only)")
-
 cluster_features = [
     "computed_deviation_percent",
     "breach_amount_percent",
-    "peer_trade_count",
     "is_btb_trade"
 ]
 
-cluster_input = (
-    alerts_df
-    .select(["trade_id"] + cluster_features)
-    .drop_nulls()
-)
+cluster_input = alerts_df.select(["trade_id"] + cluster_features).drop_nulls()
 
 if cluster_input.height >= 10:
     X = cluster_input.select(cluster_features).to_numpy()
     X = StandardScaler().fit_transform(X)
 
-    k = st.slider("Number of clusters", 2, 6, 3)
+    labels = KMeans(n_clusters=3, random_state=42, n_init=10).fit_predict(X)
 
-    labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X)
-
-    cluster_df = pl.DataFrame({
-        "trade_id": cluster_input["trade_id"],
-        "alert_cluster": labels
-    })
-
-    alerts_df = alerts_df.join(cluster_df, on="trade_id", how="left")
-
-    cluster_summary = (
-        alerts_df
-        .group_by("alert_cluster")
-        .agg([
-            pl.count().alias("alert_count"),
-            pl.mean("computed_deviation_percent").round(2).alias("avg_deviation"),
-            pl.mean("peer_trade_count").round(2).alias("avg_peer_count")
-        ])
+    alerts_df = alerts_df.join(
+        pl.DataFrame({"trade_id": cluster_input["trade_id"], "alert_cluster": labels}),
+        on="trade_id",
+        how="left"
     )
 
-    st.subheader("Cluster Summary")
-    st.dataframe(cluster_summary, use_container_width=True)
-else:
-    st.warning("Not enough alerts for clustering")
-
 # =====================================================
-# DISPLAY SAMPLE
+# DISPLAY
 # =====================================================
-st.header("4️⃣ Sample Closure Evidence")
-
-display_cols = [
-    "trade_id",
-    "trade_date_only",
-    "bui_value",
-    "alert_description",
-    "computed_deviation_percent",
-    "peer_reference_type",
-    "peer_trade_ids_str",
-    "fp_like_flag",
-    "alert_cluster",
-    "closure_evidence"
-]
+st.header("Sample Closure Evidence")
 
 st.dataframe(
-    alerts_df.select(display_cols).head(500),
+    alerts_df.select([
+        "trade_id",
+        "trade_datetime",
+        "bui_value",
+        "alert_description",
+        "peer_reference_type",
+        "peer_trade_ids_str",
+        "closure_evidence"
+    ]).head(500),
     use_container_width=True
 )
 
@@ -363,6 +326,7 @@ st.dataframe(
 # CSV SAFE EXPORT
 # =====================================================
 csv_safe_df = alerts_df.drop([
+    "tw_peer_trade_ids",
     "sd_peer_trade_ids",
     "hist_peer_trade_ids",
     "peer_trade_ids"
@@ -371,8 +335,8 @@ csv_safe_df = alerts_df.drop([
 st.download_button(
     "Download Closure Evidence (CSV)",
     csv_safe_df.write_csv(),
-    file_name="omrc_alert_closure_evidence.csv",
+    file_name="omrc_fx_price_deviation_closure.csv",
     mime="text/csv"
 )
 
-st.success("OMRC closure evidence generation completed successfully")
+st.success("OMRC price deviation closure evidence generated successfully")
