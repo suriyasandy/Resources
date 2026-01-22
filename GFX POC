@@ -1,43 +1,21 @@
 import streamlit as st
 import polars as pl
-from pathlib import Path
 
-st.set_page_config(page_title="OMRC – GFX Rule Attribution", layout="wide")
+st.set_page_config(page_title="OMRC – Alert False Positive Analyzer", layout="wide")
 
-st.title("OMRC – GFX Rule-Delta Attribution Platform")
-st.caption("Deterministic | Rule-based | OMRC-safe")
+st.title("OMRC – Alert False Positive Evidence Platform")
+st.caption("Rule-engine aware | Peer-based | Closure-ready")
 
-# -----------------------------
-# Utility helpers
-# -----------------------------
-def col_exists(df, col):
-    return col in df.columns
-
-def safe_col(df, col, default=None):
-    if col_exists(df, col):
-        return pl.col(col)
-    return pl.lit(default)
-
-# -----------------------------
-# Load file (CSV / Parquet)
-# -----------------------------
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
 def load_file(uploaded_file):
-    suffix = uploaded_file.name.split(".")[-1].lower()
-    if suffix == "parquet":
+    if uploaded_file.name.endswith(".parquet"):
         return pl.read_parquet(uploaded_file)
-    elif suffix == "csv":
-        return pl.read_csv(uploaded_file, infer_schema_length=10000)
-    else:
-        st.error("Unsupported file type")
-        st.stop()
+    return pl.read_csv(uploaded_file, infer_schema_length=10000)
 
-# -----------------------------
-# Core attribution logic
-# -----------------------------
-def build_attribution(df: pl.DataFrame) -> pl.DataFrame:
-
-    # Compute deviation if missing
-    df = df.with_columns([
+def compute_deviation(df):
+    return df.with_columns(
         pl.when(pl.col("deviation_percent").is_null())
         .then(
             (pl.col("quoted_market_rate") - pl.col("market_rate")).abs()
@@ -45,109 +23,173 @@ def build_attribution(df: pl.DataFrame) -> pl.DataFrame:
         )
         .otherwise(pl.col("deviation_percent"))
         .alias("computed_deviation_percent")
-    ])
+    )
 
-    # Threshold breach
-    df = df.with_columns([
-        (pl.col("computed_deviation_percent") - pl.col("base_threshold_percent"))
-        .alias("breach_amount_percent")
-    ])
-
-    # BTB flag
-    df = df.with_columns([
-        pl.when(
-            (pl.col("bui_value") == "BTB") |
-            (pl.col("back_to_back_book") != pl.col("risk_book"))
-        )
-        .then(pl.lit("YES"))
-        .otherwise(pl.lit("NO"))
-        .alias("is_btb_trade")
-    ])
-
-    # Explanation text (strict dictionary)
-    df = df.with_columns([
-        pl.when(pl.col("breach_amount_percent") > 0)
-        .then(pl.lit("Observed deviation exceeds configured threshold"))
-        .otherwise(pl.lit("Observed deviation within configured threshold"))
-        .alias("rule_outcome")
-    ])
-
-    df = df.with_columns([
-        (
-            pl.lit("Deviation: ")
-            + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
-            + pl.lit("% | Threshold: ")
-            + pl.col("base_threshold_percent").cast(pl.Utf8)
-            + pl.lit("% | BTB: ")
-            + pl.col("is_btb_trade")
-            + pl.lit(" | Market source: ")
-            + pl.col("market_rate_source").cast(pl.Utf8)
-        ).alias("closure_explanation")
-    ])
-
-    return df
-
-# -----------------------------
-# Upload latest file
-# -----------------------------
+# --------------------------------------------------
+# FILE UPLOAD
+# --------------------------------------------------
 uploaded_file = st.file_uploader(
-    "Upload Latest GFX Trade File (CSV / Parquet)",
+    "Upload GFX Rule Engine Output (CSV / Parquet)",
     type=["csv", "parquet"]
 )
 
-if uploaded_file:
-    with st.spinner("Loading file..."):
-        df = load_file(uploaded_file)
+if not uploaded_file:
+    st.stop()
 
-    required_cols = [
-        "trade_id",
-        "ccy_pair",
-        "market_rate",
-        "quoted_market_rate",
-        "quoted_eod_rate",
-        "base_threshold_percent",
-        "orig_threshold_percent",
-        "deviation_percent",
-        "market_rate_source",
-        "originating_system",
-        "bui_value",
-        "back_to_back_book",
-        "risk_book",
-    ]
+with st.spinner("Loading dataset..."):
+    df = load_file(uploaded_file)
 
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        st.warning(f"Missing columns (handled safely): {missing}")
+st.success(f"Loaded {df.height:,} trades")
 
-    df_attr = build_attribution(df)
+# --------------------------------------------------
+# BASIC VALIDATION
+# --------------------------------------------------
+required_cols = [
+    "trade_id",
+    "ccy_pair",
+    "book",
+    "product",
+    "trade_type",
+    "alert_description",
+    "market_rate",
+    "quoted_market_rate",
+    "base_threshold_percent",
+    "deviation_percent",
+]
 
-    st.success(f"Processed {df_attr.height:,} trades")
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    st.error(f"Missing required columns: {missing}")
+    st.stop()
 
-    # Display table
-    st.subheader("Trade-level Rule Attribution")
+# --------------------------------------------------
+# DERIVED METRICS
+# --------------------------------------------------
+df = compute_deviation(df)
 
-    display_cols = [
-        "trade_id",
-        "ccy_pair",
-        "computed_deviation_percent",
-        "base_threshold_percent",
-        "breach_amount_percent",
-        "is_btb_trade",
-        "rule_outcome",
-        "closure_explanation",
-    ]
+df = df.with_columns(
+    (pl.col("computed_deviation_percent") - pl.col("base_threshold_percent"))
+    .alias("breach_amount_percent")
+)
 
-    available_cols = [c for c in display_cols if c in df_attr.columns]
+# --------------------------------------------------
+# SPLIT ALERT / NON-ALERT
+# --------------------------------------------------
+alerts_df = df.filter(pl.col("alert_description").is_not_null())
+clean_df = df.filter(pl.col("alert_description").is_null())
 
-    st.dataframe(
-        df_attr.select(available_cols).head(500),
-        use_container_width=True
+st.metric("Total Alerts", alerts_df.height)
+st.metric("Valid Trades (Control Group)", clean_df.height)
+
+# --------------------------------------------------
+# PEER GROUP DEFINITION
+# --------------------------------------------------
+peer_keys = ["ccy_pair", "book", "product", "trade_type"]
+
+# --------------------------------------------------
+# PEER STATISTICS (NON-ALERT TRADES)
+# --------------------------------------------------
+peer_stats = (
+    clean_df
+    .group_by(peer_keys)
+    .agg([
+        pl.median("computed_deviation_percent").alias("peer_median_dev"),
+        pl.quantile("computed_deviation_percent", 0.75).alias("peer_75pct_dev"),
+        pl.count().alias("peer_trade_count")
+    ])
+)
+
+# --------------------------------------------------
+# ENRICH ALERTS WITH PEER EVIDENCE
+# --------------------------------------------------
+alerts_enriched = alerts_df.join(
+    peer_stats,
+    on=peer_keys,
+    how="left"
+)
+
+# --------------------------------------------------
+# BTB FLAG
+# --------------------------------------------------
+alerts_enriched = alerts_enriched.with_columns(
+    pl.when(
+        (pl.col("bui_value") == "BTB") |
+        (pl.col("back_to_back_book") != pl.col("risk_book"))
     )
+    .then(pl.lit("YES"))
+    .otherwise(pl.lit("NO"))
+    .alias("is_btb_trade")
+)
 
-    # Download
-    st.download_button(
-        "Download Attribution Output",
-        df_attr.select(available_cols).write_csv(),
-        file_name="omrc_rule_attribution.csv",
-        mime="text/csv"
-    )
+# --------------------------------------------------
+# CLOSURE EXPLANATION (STRICT TEMPLATE)
+# --------------------------------------------------
+alerts_enriched = alerts_enriched.with_columns(
+    (
+        pl.lit("Alert: ")
+        + pl.col("alert_description")
+        + pl.lit(" | Observed deviation: ")
+        + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
+        + pl.lit("% vs Threshold: ")
+        + pl.col("base_threshold_percent").cast(pl.Utf8)
+        + pl.lit("% | Peer median (non-alert): ")
+        + pl.col("peer_median_dev").round(2).cast(pl.Utf8)
+        + pl.lit("% | Similar non-alert trades: ")
+        + pl.col("peer_trade_count").cast(pl.Utf8)
+        + pl.lit(" | BTB: ")
+        + pl.col("is_btb_trade")
+    ).alias("closure_evidence")
+)
+
+# --------------------------------------------------
+# DISPLAY
+# --------------------------------------------------
+st.subheader("Alert-level False Positive Evidence")
+
+display_cols = [
+    "trade_id",
+    "alert_description",
+    "computed_deviation_percent",
+    "base_threshold_percent",
+    "breach_amount_percent",
+    "peer_median_dev",
+    "peer_75pct_dev",
+    "peer_trade_count",
+    "is_btb_trade",
+    "closure_evidence"
+]
+
+st.dataframe(
+    alerts_enriched.select(display_cols).head(500),
+    use_container_width=True
+)
+
+# --------------------------------------------------
+# RULE-LEVEL SUMMARY
+# --------------------------------------------------
+st.subheader("Rule-wise Alert Context")
+
+rule_summary = (
+    alerts_enriched
+    .group_by("alert_description")
+    .agg([
+        pl.count().alias("alert_count"),
+        pl.mean("breach_amount_percent").alias("avg_breach"),
+        pl.mean("peer_trade_count").alias("avg_peer_trades")
+    ])
+    .sort("alert_count", descending=True)
+)
+
+st.dataframe(rule_summary, use_container_width=True)
+
+# --------------------------------------------------
+# DOWNLOAD
+# --------------------------------------------------
+st.download_button(
+    "Download Alert Evidence (CSV)",
+    alerts_enriched.select(display_cols).write_csv(),
+    file_name="omrc_alert_false_positive_evidence.csv",
+    mime="text/csv"
+)
+
+st.success("Alert false-positive analysis completed")
