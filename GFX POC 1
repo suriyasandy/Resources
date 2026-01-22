@@ -1,6 +1,5 @@
 import streamlit as st
 import polars as pl
-import numpy as np
 from pathlib import Path
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -9,14 +8,12 @@ from sklearn.preprocessing import StandardScaler
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="OMRC – Trade-Date Aware Closure Evidence",
+    page_title="OMRC – Closure Evidence Platform",
     layout="wide"
 )
 
-st.title("OMRC – Alert False Positive & Closure Evidence Platform")
-st.caption(
-    "Passed-trade peer reference | Same-day priority | Desk = BUI | ML for similarity only"
-)
+st.title("OMRC – Alert False Positive & Closure Evidence")
+st.caption("Passed-trade peers | Same-day priority | Desk = BUI | ML for grouping only")
 
 # =====================================================
 # CONFIG
@@ -56,14 +53,14 @@ def convert_csv_to_parquet(csv_path: Path) -> Path:
     return pq
 
 
-def ensure_columns(df):
+def ensure_columns(df: pl.DataFrame) -> pl.DataFrame:
     for c in REQUIRED_COLS:
         if c not in df.columns:
             df = df.with_columns(pl.lit(None).alias(c))
     return df
 
 
-def parse_trade_date(df):
+def parse_trade_date(df: pl.DataFrame) -> pl.DataFrame:
     return (
         df.with_columns(
             pl.col("trade_date")
@@ -77,7 +74,7 @@ def parse_trade_date(df):
     )
 
 
-def compute_deviation(df):
+def compute_deviation(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(
         pl.when(pl.col("deviation_percent").is_null())
         .then(
@@ -89,7 +86,7 @@ def compute_deviation(df):
     )
 
 
-def add_btb_flag(df):
+def add_btb_flag(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(
         pl.when(
             (pl.col("bui_value") == "BTB") |
@@ -122,8 +119,8 @@ if not csv_path.exists():
 # LOAD DATA
 # =====================================================
 pq_path = convert_csv_to_parquet(csv_path)
-df = pl.read_parquet(pq_path)
 
+df = pl.read_parquet(pq_path)
 df = ensure_columns(df)
 df = parse_trade_date(df)
 
@@ -157,7 +154,7 @@ passed_df = compute_deviation(passed_df)
 peer_keys = ["ccy_pair", "product", "trade_type", "bui_value"]
 
 # =====================================================
-# SAME-DAY PEER STATS + IDS
+# SAME-DAY PEERS (PASSED ONLY)
 # =====================================================
 same_day_peers = (
     passed_df
@@ -170,7 +167,7 @@ same_day_peers = (
 )
 
 # =====================================================
-# HISTORICAL PEER STATS + IDS
+# HISTORICAL PEERS (PASSED ONLY)
 # =====================================================
 hist_peers = (
     passed_df
@@ -198,7 +195,7 @@ alerts_df = alerts_df.join(
 )
 
 # =====================================================
-# SELECT PEER REFERENCE (SAME-DAY FIRST)
+# SELECT PEER REFERENCE (SAFE)
 # =====================================================
 alerts_df = alerts_df.with_columns([
     pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
@@ -223,7 +220,17 @@ alerts_df = alerts_df.with_columns([
 ])
 
 # =====================================================
-# FALSE POSITIVE INDICATOR (EVIDENCE ONLY)
+# FLATTEN PEER IDS (CSV SAFE)
+# =====================================================
+alerts_df = alerts_df.with_columns(
+    pl.when(pl.col("peer_trade_ids").is_null())
+    .then(pl.lit("N/A"))
+    .otherwise(pl.col("peer_trade_ids").list.join(", "))
+    .alias("peer_trade_ids_str")
+)
+
+# =====================================================
+# FALSE POSITIVE HEURISTIC (EVIDENCE ONLY)
 # =====================================================
 alerts_df = alerts_df.with_columns(
     pl.when(
@@ -236,7 +243,7 @@ alerts_df = alerts_df.with_columns(
 )
 
 # =====================================================
-# CLOSURE EVIDENCE (WITH TRADE IDS)
+# CLOSURE EVIDENCE (FINAL)
 # =====================================================
 alerts_df = alerts_df.with_columns(
     (
@@ -262,7 +269,7 @@ alerts_df = alerts_df.with_columns(
 # =====================================================
 # DESK-LEVEL FALSE POSITIVE RATE (BUI)
 # =====================================================
-st.header("2️⃣ Desk-level False Positive Rates (by BUI)")
+st.header("2️⃣ Desk-level False Positive Rates")
 
 desk_fp = (
     alerts_df
@@ -282,9 +289,9 @@ desk_fp = (
 st.dataframe(desk_fp, use_container_width=True)
 
 # =====================================================
-# ML CLUSTERING (SIMILARITY ONLY)
+# ML CLUSTERING (SHAPE + CSV SAFE)
 # =====================================================
-st.header("3️⃣ Alert Clustering (ML – Similarity Only)")
+st.header("3️⃣ Alert Clustering (Similarity Only)")
 
 cluster_features = [
     "computed_deviation_percent",
@@ -330,9 +337,9 @@ else:
     st.warning("Not enough alerts for clustering")
 
 # =====================================================
-# SAMPLE VIEW
+# DISPLAY SAMPLE
 # =====================================================
-st.header("4️⃣ Sample Alert Closure Evidence")
+st.header("4️⃣ Sample Closure Evidence")
 
 display_cols = [
     "trade_id",
@@ -340,27 +347,32 @@ display_cols = [
     "bui_value",
     "alert_description",
     "computed_deviation_percent",
-    "base_threshold_percent",
     "peer_reference_type",
-    "peer_trade_ids",
+    "peer_trade_ids_str",
     "fp_like_flag",
     "alert_cluster",
     "closure_evidence"
 ]
 
 st.dataframe(
-    alerts_df.select([c for c in display_cols if c in alerts_df.columns]).head(500),
+    alerts_df.select(display_cols).head(500),
     use_container_width=True
 )
 
 # =====================================================
-# EXPORT
+# CSV SAFE EXPORT
 # =====================================================
+csv_safe_df = alerts_df.drop([
+    "sd_peer_trade_ids",
+    "hist_peer_trade_ids",
+    "peer_trade_ids"
+])
+
 st.download_button(
-    "Download Alert Closure Evidence (CSV)",
-    alerts_df.write_csv(),
-    file_name="omrc_alert_closure_with_trade_ids.csv",
+    "Download Closure Evidence (CSV)",
+    csv_safe_df.write_csv(),
+    file_name="omrc_alert_closure_evidence.csv",
     mime="text/csv"
 )
 
-st.success("OMRC trade-date-aware closure evidence & clustering completed")
+st.success("OMRC closure evidence generation completed successfully")
