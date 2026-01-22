@@ -9,12 +9,12 @@ from sklearn.preprocessing import StandardScaler
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="OMRC – Desk FP Rates & Alert Clustering",
+    page_title="OMRC – Desk FP & Closure Evidence Platform",
     layout="wide"
 )
 
-st.title("OMRC – Desk False Positive & Alert Similarity Platform")
-st.caption("Rule-engine aware | Large data | ML for grouping only")
+st.title("OMRC – Desk False Positive & Closure Evidence Platform")
+st.caption("Rule-engine aware | Passed-trade peer reference | ML for grouping only")
 
 # =====================================================
 # CONFIG
@@ -24,7 +24,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 REQUIRED_COLS = [
     "trade_id",
-    "book",
+    "bui_value",
     "ccy_pair",
     "product",
     "trade_type",
@@ -33,7 +33,6 @@ REQUIRED_COLS = [
     "quoted_market_rate",
     "base_threshold_percent",
     "deviation_percent",
-    "bui_value",
     "back_to_back_book",
     "risk_book",
 ]
@@ -42,14 +41,12 @@ REQUIRED_COLS = [
 # HELPERS
 # =====================================================
 def convert_csv_to_parquet(csv_path: Path) -> Path:
-    parquet_path = CACHE_DIR / f"{csv_path.stem}.parquet"
-    if parquet_path.exists():
-        return parquet_path
-
+    pq = CACHE_DIR / f"{csv_path.stem}.parquet"
+    if pq.exists():
+        return pq
     with st.spinner("Converting CSV → Parquet (one-time)…"):
-        pl.scan_csv(csv_path, infer_schema_length=10000).collect().write_parquet(parquet_path)
-
-    return parquet_path
+        pl.scan_csv(csv_path, infer_schema_length=10000).collect().write_parquet(pq)
+    return pq
 
 
 def ensure_columns(df):
@@ -71,6 +68,15 @@ def compute_deviation(df):
     )
 
 
+def derive_desk(df):
+    return df.with_columns(
+        pl.when(pl.col("bui_value").str.contains("BACK|BTB", case=False))
+        .then(pl.lit("HEDGE_DESK"))
+        .otherwise(pl.lit("CLIENT_DESK"))
+        .alias("desk_type")
+    )
+
+
 def add_btb_flag(df):
     return df.with_columns(
         pl.when(
@@ -88,7 +94,7 @@ def add_btb_flag(df):
 st.header("1️⃣ Provide OMRC Rule Engine CSV Path")
 
 csv_path_input = st.text_input(
-    "Full path to rule-engine CSV file",
+    "Full path to rule-engine CSV",
     placeholder="C:/data/GFX_RULE_ENGINE_20260116.csv"
 )
 
@@ -103,21 +109,21 @@ if not csv_path.exists():
 # =====================================================
 # LOAD DATA
 # =====================================================
-parquet_path = convert_csv_to_parquet(csv_path)
-df = pl.read_parquet(parquet_path)
+pq_path = convert_csv_to_parquet(csv_path)
+df = pl.read_parquet(pq_path)
 df = ensure_columns(df)
+df = derive_desk(df)
 
 st.success(f"Loaded {df.height:,} trades")
 
 # =====================================================
-# ALERT SPLIT
+# SPLIT PASSED / ALERT TRADES
 # =====================================================
 alerts_df = df.filter(pl.col("alert_description").is_not_null())
-clean_df = df.filter(pl.col("alert_description").is_null())
+passed_df = df.filter(pl.col("alert_description").is_null())
 
-st.metric("Total Trades", df.height)
-st.metric("Alerted Trades", alerts_df.height)
-st.metric("Non-alert Trades", clean_df.height)
+st.metric("Alert Trades", alerts_df.height)
+st.metric("Passed Trades (Peer Reference)", passed_df.height)
 
 # =====================================================
 # FEATURE ENGINEERING
@@ -130,18 +136,19 @@ alerts_df = alerts_df.with_columns(
     .alias("breach_amount_percent")
 )
 
-clean_df = compute_deviation(clean_df)
+passed_df = compute_deviation(passed_df)
 
 # =====================================================
-# PEER STATS (NON-ALERT TRADES)
+# PEER STATS (PASSED TRADES ONLY)
 # =====================================================
-peer_keys = ["ccy_pair", "book", "product", "trade_type"]
+peer_keys = ["ccy_pair", "product", "trade_type", "desk_type"]
 
 peer_stats = (
-    clean_df
+    passed_df
     .group_by(peer_keys)
     .agg([
         pl.median("computed_deviation_percent").alias("peer_median_dev"),
+        pl.quantile("computed_deviation_percent", 0.75).alias("peer_75pct_dev"),
         pl.count().alias("peer_trade_count")
     ])
 )
@@ -149,7 +156,7 @@ peer_stats = (
 alerts_df = alerts_df.join(peer_stats, on=peer_keys, how="left")
 
 # =====================================================
-# FALSE POSITIVE INDICATOR (EVIDENCE BASED)
+# FALSE POSITIVE HEURISTIC (EVIDENCE ONLY)
 # =====================================================
 alerts_df = alerts_df.with_columns(
     pl.when(
@@ -162,13 +169,35 @@ alerts_df = alerts_df.with_columns(
 )
 
 # =====================================================
+# CLOSURE EVIDENCE (STRICT TEMPLATE)
+# =====================================================
+alerts_df = alerts_df.with_columns(
+    (
+        pl.lit("Rule: ")
+        + pl.col("alert_description")
+        + pl.lit(" | Deviation: ")
+        + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
+        + pl.lit("% vs Threshold: ")
+        + pl.col("base_threshold_percent").cast(pl.Utf8)
+        + pl.lit("% | Peer median (passed trades): ")
+        + pl.col("peer_median_dev").round(2).cast(pl.Utf8)
+        + pl.lit("% | Peer count: ")
+        + pl.col("peer_trade_count").cast(pl.Utf8)
+        + pl.lit(" | Desk: ")
+        + pl.col("desk_type")
+        + pl.lit(" | BTB: ")
+        + pl.col("is_btb_trade").cast(pl.Utf8)
+    ).alias("closure_evidence")
+)
+
+# =====================================================
 # DESK-LEVEL FALSE POSITIVE RATE
 # =====================================================
 st.header("2️⃣ Desk-level False Positive Rates")
 
 desk_fp = (
     alerts_df
-    .group_by("book")
+    .group_by("desk_type")
     .agg([
         pl.count().alias("total_alerts"),
         pl.sum("fp_like_flag").alias("fp_like_alerts")
@@ -178,13 +207,12 @@ desk_fp = (
         .round(2)
         .alias("fp_rate_percent")
     )
-    .sort("fp_rate_percent", descending=True)
 )
 
 st.dataframe(desk_fp, use_container_width=True)
 
 # =====================================================
-# ML CLUSTERING (SHAPE-SAFE)
+# ML CLUSTERING (SIMILARITY ONLY)
 # =====================================================
 st.header("3️⃣ Alert Clustering (ML – Similarity Only)")
 
@@ -203,25 +231,18 @@ cluster_input = (
 
 if cluster_input.height >= 10:
     X = cluster_input.select(cluster_features).to_numpy()
-    X_scaled = StandardScaler().fit_transform(X)
+    X = StandardScaler().fit_transform(X)
 
     k = st.slider("Number of clusters", 2, 6, 3)
 
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(X_scaled)
+    labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X)
 
-    cluster_labels_df = pl.DataFrame({
+    cluster_df = pl.DataFrame({
         "trade_id": cluster_input["trade_id"],
         "alert_cluster": labels
     })
 
-    alerts_df = alerts_df.join(
-        cluster_labels_df,
-        on="trade_id",
-        how="left"
-    )
-
-    st.success("Alert clustering completed")
+    alerts_df = alerts_df.join(cluster_df, on="trade_id", how="left")
 
     cluster_summary = (
         alerts_df
@@ -229,17 +250,14 @@ if cluster_input.height >= 10:
         .agg([
             pl.count().alias("alert_count"),
             pl.mean("computed_deviation_percent").round(2).alias("avg_deviation"),
-            pl.mean("breach_amount_percent").round(2).alias("avg_breach"),
-            pl.mean("peer_trade_count").round(2).alias("avg_peer_trades")
+            pl.mean("peer_trade_count").round(2).alias("avg_peer_count")
         ])
-        .sort("alert_count", descending=True)
     )
 
     st.subheader("Cluster Summary")
     st.dataframe(cluster_summary, use_container_width=True)
-
 else:
-    st.warning("Not enough alerts with complete data for clustering")
+    st.warning("Not enough alerts for clustering")
 
 # =====================================================
 # SAMPLE ALERT VIEW
@@ -248,14 +266,14 @@ st.header("4️⃣ Sample Alert Evidence")
 
 display_cols = [
     "trade_id",
-    "book",
+    "desk_type",
     "alert_description",
     "computed_deviation_percent",
     "base_threshold_percent",
     "peer_trade_count",
-    "is_btb_trade",
     "fp_like_flag",
-    "alert_cluster"
+    "alert_cluster",
+    "closure_evidence"
 ]
 
 st.dataframe(
@@ -267,10 +285,10 @@ st.dataframe(
 # EXPORT
 # =====================================================
 st.download_button(
-    "Download Full Alert Analytics (CSV)",
+    "Download Alert Evidence (CSV)",
     alerts_df.write_csv(),
-    file_name="omrc_desk_fp_and_alert_clusters.csv",
+    file_name="omrc_alert_closure_evidence.csv",
     mime="text/csv"
 )
 
-st.success("OMRC desk-level FP analysis & alert clustering completed")
+st.success("OMRC desk FP analysis, closure evidence & clustering completed")
