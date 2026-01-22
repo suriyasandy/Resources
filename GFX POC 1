@@ -9,13 +9,13 @@ from sklearn.preprocessing import StandardScaler
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="OMRC – Trade-Date Aware FP & Closure Evidence",
+    page_title="OMRC – Trade-Date Aware Closure Evidence",
     layout="wide"
 )
 
 st.title("OMRC – Alert False Positive & Closure Evidence Platform")
 st.caption(
-    "Passed-trade peer reference | Same-day priority | ML for similarity only"
+    "Passed-trade peer reference | Same-day priority | Desk = BUI | ML for similarity only"
 )
 
 # =====================================================
@@ -26,6 +26,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 DATE_FORMAT = "%d/%m/%Y %H:%M:%S%.f"
 MIN_PEERS = 5
+MAX_PEER_TRADE_IDS = 3
 
 REQUIRED_COLS = [
     "trade_id",
@@ -88,15 +89,6 @@ def compute_deviation(df):
     )
 
 
-def derive_desk(df):
-    return df.with_columns(
-        pl.when(pl.col("bui_value").str.contains("BACK|BTB", case=False))
-        .then(pl.lit("HEDGE_DESK"))
-        .otherwise(pl.lit("CLIENT_DESK"))
-        .alias("desk_type")
-    )
-
-
 def add_btb_flag(df):
     return df.with_columns(
         pl.when(
@@ -134,7 +126,6 @@ df = pl.read_parquet(pq_path)
 
 df = ensure_columns(df)
 df = parse_trade_date(df)
-df = derive_desk(df)
 
 st.success(f"Loaded {df.height:,} trades")
 
@@ -161,31 +152,33 @@ alerts_df = alerts_df.with_columns(
 passed_df = compute_deviation(passed_df)
 
 # =====================================================
-# PEER KEYS
+# PEER KEYS (DESK = BUI)
 # =====================================================
-peer_keys = ["ccy_pair", "product", "trade_type", "desk_type"]
+peer_keys = ["ccy_pair", "product", "trade_type", "bui_value"]
 
 # =====================================================
-# SAME-DAY PEER STATS (PASSED TRADES)
+# SAME-DAY PEER STATS + IDS
 # =====================================================
 same_day_peers = (
     passed_df
     .group_by(peer_keys + ["trade_date_only"])
     .agg([
         pl.median("computed_deviation_percent").alias("sd_peer_median_dev"),
-        pl.count().alias("sd_peer_trade_count")
+        pl.count().alias("sd_peer_trade_count"),
+        pl.col("trade_id").head(MAX_PEER_TRADE_IDS).alias("sd_peer_trade_ids")
     ])
 )
 
 # =====================================================
-# HISTORICAL PEER STATS (PASSED TRADES)
+# HISTORICAL PEER STATS + IDS
 # =====================================================
 hist_peers = (
     passed_df
     .group_by(peer_keys)
     .agg([
         pl.median("computed_deviation_percent").alias("hist_peer_median_dev"),
-        pl.count().alias("hist_peer_trade_count")
+        pl.count().alias("hist_peer_trade_count"),
+        pl.col("trade_id").head(MAX_PEER_TRADE_IDS).alias("hist_peer_trade_ids")
     ])
 )
 
@@ -207,26 +200,27 @@ alerts_df = alerts_df.join(
 # =====================================================
 # SELECT PEER REFERENCE (SAME-DAY FIRST)
 # =====================================================
-alerts_df = alerts_df.with_columns(
+alerts_df = alerts_df.with_columns([
     pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.col("sd_peer_median_dev"))
     .otherwise(pl.col("hist_peer_median_dev"))
-    .alias("peer_median_dev")
-)
+    .alias("peer_median_dev"),
 
-alerts_df = alerts_df.with_columns(
     pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.col("sd_peer_trade_count"))
     .otherwise(pl.col("hist_peer_trade_count"))
-    .alias("peer_trade_count")
-)
+    .alias("peer_trade_count"),
 
-alerts_df = alerts_df.with_columns(
+    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
+    .then(pl.col("sd_peer_trade_ids"))
+    .otherwise(pl.col("hist_peer_trade_ids"))
+    .alias("peer_trade_ids"),
+
     pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.lit("SAME_DAY"))
     .otherwise(pl.lit("HISTORICAL"))
     .alias("peer_reference_type")
-)
+])
 
 # =====================================================
 # FALSE POSITIVE INDICATOR (EVIDENCE ONLY)
@@ -242,7 +236,7 @@ alerts_df = alerts_df.with_columns(
 )
 
 # =====================================================
-# CLOSURE EVIDENCE
+# CLOSURE EVIDENCE (WITH TRADE IDS)
 # =====================================================
 alerts_df = alerts_df.with_columns(
     (
@@ -256,23 +250,23 @@ alerts_df = alerts_df.with_columns(
         + pl.col("peer_reference_type")
         + pl.lit("): ")
         + pl.col("peer_median_dev").round(2).cast(pl.Utf8)
-        + pl.lit("% | Peer count: ")
-        + pl.col("peer_trade_count").cast(pl.Utf8)
-        + pl.lit(" | Desk: ")
-        + pl.col("desk_type")
+        + pl.lit("% | Example peer trade_ids: ")
+        + pl.col("peer_trade_ids").cast(pl.Utf8)
+        + pl.lit(" | Desk (BUI): ")
+        + pl.col("bui_value")
         + pl.lit(" | BTB: ")
         + pl.col("is_btb_trade").cast(pl.Utf8)
     ).alias("closure_evidence")
 )
 
 # =====================================================
-# DESK-LEVEL FALSE POSITIVE RATE
+# DESK-LEVEL FALSE POSITIVE RATE (BUI)
 # =====================================================
-st.header("2️⃣ Desk-level False Positive Rates")
+st.header("2️⃣ Desk-level False Positive Rates (by BUI)")
 
 desk_fp = (
     alerts_df
-    .group_by("desk_type")
+    .group_by("bui_value")
     .agg([
         pl.count().alias("total_alerts"),
         pl.sum("fp_like_flag").alias("fp_like_alerts")
@@ -282,6 +276,7 @@ desk_fp = (
         .round(2)
         .alias("fp_rate_percent")
     )
+    .sort("fp_rate_percent", descending=True)
 )
 
 st.dataframe(desk_fp, use_container_width=True)
@@ -342,12 +337,12 @@ st.header("4️⃣ Sample Alert Closure Evidence")
 display_cols = [
     "trade_id",
     "trade_date_only",
-    "desk_type",
+    "bui_value",
     "alert_description",
     "computed_deviation_percent",
     "base_threshold_percent",
     "peer_reference_type",
-    "peer_trade_count",
+    "peer_trade_ids",
     "fp_like_flag",
     "alert_cluster",
     "closure_evidence"
@@ -364,8 +359,8 @@ st.dataframe(
 st.download_button(
     "Download Alert Closure Evidence (CSV)",
     alerts_df.write_csv(),
-    file_name="omrc_alert_closure_with_trade_date.csv",
+    file_name="omrc_alert_closure_with_trade_ids.csv",
     mime="text/csv"
 )
 
-st.success("OMRC trade-date-aware false positive analysis completed")
+st.success("OMRC trade-date-aware closure evidence & clustering completed")
