@@ -1,0 +1,262 @@
+import streamlit as st
+import polars as pl
+import numpy as np
+from pathlib import Path
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+# =====================================================
+# PAGE CONFIG
+# =====================================================
+st.set_page_config(
+    page_title="OMRC – Desk FP Rates & Alert Clustering",
+    layout="wide"
+)
+
+st.title("OMRC – Desk False Positive Analytics Platform")
+st.caption("Rule-engine evidence | Desk metrics | ML clustering (non-decisional)")
+
+# =====================================================
+# CONFIG
+# =====================================================
+CACHE_DIR = Path("./parquet_cache")
+CACHE_DIR.mkdir(exist_ok=True)
+
+REQUIRED_COLS = [
+    "trade_id",
+    "book",
+    "ccy_pair",
+    "product",
+    "trade_type",
+    "alert_description",
+    "market_rate",
+    "quoted_market_rate",
+    "base_threshold_percent",
+    "deviation_percent",
+    "bui_value",
+    "back_to_back_book",
+    "risk_book"
+]
+
+# =====================================================
+# HELPERS
+# =====================================================
+def convert_csv_to_parquet(csv_path: Path) -> Path:
+    pq_path = CACHE_DIR / f"{csv_path.stem}.parquet"
+    if pq_path.exists():
+        return pq_path
+
+    with st.spinner("Converting CSV → Parquet (one-time)..."):
+        pl.scan_csv(csv_path, infer_schema_length=10000).collect().write_parquet(pq_path)
+
+    return pq_path
+
+
+def ensure_columns(df):
+    for c in REQUIRED_COLS:
+        if c not in df.columns:
+            df = df.with_columns(pl.lit(None).alias(c))
+    return df
+
+
+def compute_deviation(df):
+    return df.with_columns(
+        pl.when(pl.col("deviation_percent").is_null())
+        .then(
+            (pl.col("quoted_market_rate") - pl.col("market_rate")).abs()
+            / pl.col("market_rate") * 100
+        )
+        .otherwise(pl.col("deviation_percent"))
+        .alias("computed_deviation_percent")
+    )
+
+
+def add_btb_flag(df):
+    return df.with_columns(
+        pl.when(
+            (pl.col("bui_value") == "BTB") |
+            (pl.col("back_to_back_book") != pl.col("risk_book"))
+        )
+        .then(pl.lit(1))
+        .otherwise(pl.lit(0))
+        .alias("is_btb_trade")
+    )
+
+# =====================================================
+# INPUT – CSV PATH
+# =====================================================
+st.header("1️⃣ Provide Rule-Engine Output File Path")
+
+csv_path_input = st.text_input(
+    "Full path to OMRC rule-engine CSV",
+    placeholder="C:/data/GFX_RULE_ENGINE_20260116.csv"
+)
+
+if not csv_path_input:
+    st.stop()
+
+csv_path = Path(csv_path_input)
+if not csv_path.exists():
+    st.error("File path does not exist")
+    st.stop()
+
+# =====================================================
+# LOAD DATA
+# =====================================================
+parquet_path = convert_csv_to_parquet(csv_path)
+df = pl.read_parquet(parquet_path)
+df = ensure_columns(df)
+
+st.success(f"Loaded {df.height:,} trades")
+
+# =====================================================
+# ALERT SPLIT
+# =====================================================
+alerts_df = df.filter(pl.col("alert_description").is_not_null())
+clean_df = df.filter(pl.col("alert_description").is_null())
+
+st.metric("Total Alerts", alerts_df.height)
+st.metric("Non-alert Trades", clean_df.height)
+
+# =====================================================
+# FEATURE ENGINEERING
+# =====================================================
+alerts_df = compute_deviation(alerts_df)
+alerts_df = add_btb_flag(alerts_df)
+
+alerts_df = alerts_df.with_columns(
+    (pl.col("computed_deviation_percent") - pl.col("base_threshold_percent"))
+    .alias("breach_amount_percent")
+)
+
+# =====================================================
+# PEER STATS (NON-ALERTS)
+# =====================================================
+peer_keys = ["ccy_pair", "book", "product", "trade_type"]
+
+clean_df = compute_deviation(clean_df)
+
+peer_stats = (
+    clean_df
+    .group_by(peer_keys)
+    .agg([
+        pl.median("computed_deviation_percent").alias("peer_median_dev"),
+        pl.count().alias("peer_trade_count")
+    ])
+)
+
+alerts_df = alerts_df.join(peer_stats, on=peer_keys, how="left")
+
+# =====================================================
+# FALSE POSITIVE HEURISTIC (EVIDENCE-BASED)
+# =====================================================
+alerts_df = alerts_df.with_columns(
+    pl.when(
+        (pl.col("peer_trade_count") >= 5) &
+        (pl.col("computed_deviation_percent") <= pl.col("peer_median_dev") * 1.2)
+    )
+    .then(pl.lit(1))
+    .otherwise(pl.lit(0))
+    .alias("fp_like_flag")
+)
+
+# =====================================================
+# DESK-LEVEL FALSE POSITIVE RATE
+# =====================================================
+st.header("2️⃣ Desk-Level False Positive Rates")
+
+desk_fp = (
+    alerts_df
+    .group_by("book")
+    .agg([
+        pl.count().alias("total_alerts"),
+        pl.sum("fp_like_flag").alias("fp_like_alerts")
+    ])
+    .with_columns(
+        (pl.col("fp_like_alerts") / pl.col("total_alerts") * 100)
+        .round(2)
+        .alias("fp_rate_percent")
+    )
+    .sort("fp_rate_percent", descending=True)
+)
+
+st.dataframe(desk_fp, use_container_width=True)
+
+# =====================================================
+# ML CLUSTERING (NON-DECISIONAL)
+# =====================================================
+st.header("3️⃣ Alert Clustering (ML – Similarity Only)")
+
+cluster_df = alerts_df.select([
+    "computed_deviation_percent",
+    "breach_amount_percent",
+    "peer_trade_count",
+    "is_btb_trade"
+]).drop_nulls()
+
+if cluster_df.height >= 10:
+    X = cluster_df.to_numpy()
+    X_scaled = StandardScaler().fit_transform(X)
+
+    k = st.slider("Number of clusters", 2, 6, 3)
+
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    labels = kmeans.fit_predict(X_scaled)
+
+    alerts_df = alerts_df.with_columns(
+        pl.Series("alert_cluster", labels.tolist())
+    )
+
+    st.success("Clustering completed")
+
+    cluster_summary = (
+        alerts_df
+        .group_by("alert_cluster")
+        .agg([
+            pl.count().alias("alert_count"),
+            pl.mean("computed_deviation_percent").round(2).alias("avg_deviation"),
+            pl.mean("breach_amount_percent").round(2).alias("avg_breach"),
+            pl.mean("peer_trade_count").round(2).alias("avg_peer_trades")
+        ])
+        .sort("alert_count", descending=True)
+    )
+
+    st.subheader("Cluster Summary")
+    st.dataframe(cluster_summary, use_container_width=True)
+
+else:
+    st.warning("Not enough alerts for clustering")
+
+# =====================================================
+# SAMPLE ALERT VIEW
+# =====================================================
+st.header("4️⃣ Sample Alert Evidence")
+
+display_cols = [
+    "trade_id",
+    "book",
+    "alert_description",
+    "computed_deviation_percent",
+    "base_threshold_percent",
+    "peer_trade_count",
+    "is_btb_trade",
+    "fp_like_flag",
+    "alert_cluster"
+]
+
+st.dataframe(
+    alerts_df.select([c for c in display_cols if c in alerts_df.columns]).head(500),
+    use_container_width=True
+)
+
+# =====================================================
+# EXPORT
+# =====================================================
+st.download_button(
+    "Download Desk & Alert Analytics (CSV)",
+    alerts_df.write_csv(),
+    file_name="omrc_desk_fp_and_clusters.csv",
+    mime="text/csv"
+)
+
+st.success("Desk FP analysis & alert clustering completed")
