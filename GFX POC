@@ -2,232 +2,152 @@ import streamlit as st
 import polars as pl
 from pathlib import Path
 
-# =====================================================
-# PAGE CONFIG
-# =====================================================
-st.set_page_config(page_title="OMRC – GFX Execution Context", layout="wide")
+st.set_page_config(page_title="OMRC – GFX Rule Attribution", layout="wide")
 
-st.title("OMRC – GFX Execution Context Platform")
-st.caption("Structural baseline | Large-file safe | OMRC-approved logic")
+st.title("OMRC – GFX Rule-Delta Attribution Platform")
+st.caption("Deterministic | Rule-based | OMRC-safe")
 
-# =====================================================
-# CONFIG
-# =====================================================
-DATA_DIR = Path("./data")
-DATA_DIR.mkdir(exist_ok=True)
+# -----------------------------
+# Utility helpers
+# -----------------------------
+def col_exists(df, col):
+    return col in df.columns
 
-HIST_PARQUET = DATA_DIR / "historical_gfx.parquet"
+def safe_col(df, col, default=None):
+    if col_exists(df, col):
+        return pl.col(col)
+    return pl.lit(default)
 
-DATE_FORMAT = "%d/%m/%Y %H:%M:%S%.f"
-
-REQUIRED_COLS = [
-    "trade_id",
-    "book",
-    "ccy_pair",
-    "tenor",
-    "trade_date",
-    "base_currency_prin_amount",
-    "bui_value"
-]
-
-# =====================================================
-# HELPERS
-# =====================================================
-def load_any_path(path: str) -> pl.DataFrame:
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"{path} does not exist")
-
-    if path.suffix.lower() == ".parquet":
-        return pl.read_parquet(path)
-    elif path.suffix.lower() == ".csv":
-        return pl.read_csv(path, ignore_errors=True)
+# -----------------------------
+# Load file (CSV / Parquet)
+# -----------------------------
+def load_file(uploaded_file):
+    suffix = uploaded_file.name.split(".")[-1].lower()
+    if suffix == "parquet":
+        return pl.read_parquet(uploaded_file)
+    elif suffix == "csv":
+        return pl.read_csv(uploaded_file, infer_schema_length=10000)
     else:
-        raise ValueError("Only CSV or Parquet supported")
+        st.error("Unsupported file type")
+        st.stop()
 
-def ensure_columns(df: pl.DataFrame) -> pl.DataFrame:
-    for c in REQUIRED_COLS:
-        if c not in df.columns:
-            df = df.with_columns(pl.lit(None).alias(c))
+# -----------------------------
+# Core attribution logic
+# -----------------------------
+def build_attribution(df: pl.DataFrame) -> pl.DataFrame:
+
+    # Compute deviation if missing
+    df = df.with_columns([
+        pl.when(pl.col("deviation_percent").is_null())
+        .then(
+            (pl.col("quoted_market_rate") - pl.col("market_rate")).abs()
+            / pl.col("market_rate") * 100
+        )
+        .otherwise(pl.col("deviation_percent"))
+        .alias("computed_deviation_percent")
+    ])
+
+    # Threshold breach
+    df = df.with_columns([
+        (pl.col("computed_deviation_percent") - pl.col("base_threshold_percent"))
+        .alias("breach_amount_percent")
+    ])
+
+    # BTB flag
+    df = df.with_columns([
+        pl.when(
+            (pl.col("bui_value") == "BTB") |
+            (pl.col("back_to_back_book") != pl.col("risk_book"))
+        )
+        .then(pl.lit("YES"))
+        .otherwise(pl.lit("NO"))
+        .alias("is_btb_trade")
+    ])
+
+    # Explanation text (strict dictionary)
+    df = df.with_columns([
+        pl.when(pl.col("breach_amount_percent") > 0)
+        .then(pl.lit("Observed deviation exceeds configured threshold"))
+        .otherwise(pl.lit("Observed deviation within configured threshold"))
+        .alias("rule_outcome")
+    ])
+
+    df = df.with_columns([
+        (
+            pl.lit("Deviation: ")
+            + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
+            + pl.lit("% | Threshold: ")
+            + pl.col("base_threshold_percent").cast(pl.Utf8)
+            + pl.lit("% | BTB: ")
+            + pl.col("is_btb_trade")
+            + pl.lit(" | Market source: ")
+            + pl.col("market_rate_source").cast(pl.Utf8)
+        ).alias("closure_explanation")
+    ])
+
     return df
 
-def parse_trade_date(df: pl.DataFrame) -> pl.DataFrame:
-    return (
-        df.with_columns(
-            pl.col("trade_date")
-            .cast(pl.Utf8, strict=False)
-            .str.strptime(pl.Datetime, DATE_FORMAT, strict=False)
-            .alias("trade_datetime")
-        )
-        .with_columns(
-            pl.col("trade_datetime").dt.date().alias("trade_date_only")
-        )
+# -----------------------------
+# Upload latest file
+# -----------------------------
+uploaded_file = st.file_uploader(
+    "Upload Latest GFX Trade File (CSV / Parquet)",
+    type=["csv", "parquet"]
+)
+
+if uploaded_file:
+    with st.spinner("Loading file..."):
+        df = load_file(uploaded_file)
+
+    required_cols = [
+        "trade_id",
+        "ccy_pair",
+        "market_rate",
+        "quoted_market_rate",
+        "quoted_eod_rate",
+        "base_threshold_percent",
+        "orig_threshold_percent",
+        "deviation_percent",
+        "market_rate_source",
+        "originating_system",
+        "bui_value",
+        "back_to_back_book",
+        "risk_book",
+    ]
+
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        st.warning(f"Missing columns (handled safely): {missing}")
+
+    df_attr = build_attribution(df)
+
+    st.success(f"Processed {df_attr.height:,} trades")
+
+    # Display table
+    st.subheader("Trade-level Rule Attribution")
+
+    display_cols = [
+        "trade_id",
+        "ccy_pair",
+        "computed_deviation_percent",
+        "base_threshold_percent",
+        "breach_amount_percent",
+        "is_btb_trade",
+        "rule_outcome",
+        "closure_explanation",
+    ]
+
+    available_cols = [c for c in display_cols if c in df_attr.columns]
+
+    st.dataframe(
+        df_attr.select(available_cols).head(500),
+        use_container_width=True
     )
 
-# =====================================================
-# BASELINE (STRUCTURAL – CORRECT)
-# =====================================================
-def build_baseline(df: pl.DataFrame):
-    keys = ["book", "ccy_pair", "tenor"]
-
-    baseline = (
-        df.group_by(keys)
-        .agg([
-            pl.median("base_currency_prin_amount")
-              .alias("baseline_median_principal"),
-            pl.count()
-              .alias("baseline_trade_count")
-        ])
+    # Download
+    st.download_button(
+        "Download Attribution Output",
+        df_attr.select(available_cols).write_csv(),
+        file_name="omrc_rule_attribution.csv",
+        mime="text/csv"
     )
-
-    return baseline, keys
-
-def explain(row):
-    msgs = []
-
-    if row["baseline_trade_count"] is None:
-        return "No historical reference available for this execution"
-
-    if row["is_btb"]:
-        msgs.append("Back-to-back trade")
-
-    if row["principal_ratio"] is not None and row["principal_ratio"] > 3:
-        msgs.append("Execution notional materially larger than historical median")
-
-    if row["baseline_trade_count"] < 5:
-        msgs.append("Limited historical reference for this execution")
-
-    if not msgs:
-        msgs.append("Execution consistent with historical trading behaviour")
-
-    return "; ".join(msgs)
-
-# =====================================================
-# SECTION 1 – HISTORICAL BASELINE
-# =====================================================
-st.header("1️⃣ Historical Baseline (One-time)")
-
-hist_path = st.text_input(
-    "Path to historical GFX CSV / Parquet",
-    placeholder="C:/data/GFX_HBEU_20260101_20260110.csv"
-)
-
-if st.button("Prepare Historical Baseline"):
-    if not hist_path:
-        st.error("Please provide a valid historical file path")
-    else:
-        with st.spinner("Preparing historical baseline..."):
-            hist_df = load_any_path(hist_path)
-            hist_df = ensure_columns(hist_df)
-            hist_df = parse_trade_date(hist_df)
-            hist_df.write_parquet(HIST_PARQUET)
-
-        st.success("Historical baseline prepared successfully")
-
-# =====================================================
-# STOP IF BASELINE NOT READY
-# =====================================================
-if not HIST_PARQUET.exists():
-    st.warning("Historical baseline not found. Prepare it first.")
-    st.stop()
-
-# =====================================================
-# SECTION 2 – DAILY FILE INFERENCE
-# =====================================================
-st.header("2️⃣ Daily GFX File Inference")
-
-daily_path = st.text_input(
-    "Path to DAILY GFX CSV / Parquet",
-    placeholder="C:/data/GFX_HBEU_RIVER_20260116.csv"
-)
-
-if not daily_path:
-    st.stop()
-
-with st.spinner("Loading daily GFX file..."):
-    daily_df = load_any_path(daily_path)
-    daily_df = ensure_columns(daily_df)
-    daily_df = parse_trade_date(daily_df)
-
-st.success(f"Loaded {daily_df.height:,} daily trades")
-
-# =====================================================
-# LOAD BASELINE
-# =====================================================
-hist_df = pl.read_parquet(HIST_PARQUET)
-baseline_df, baseline_keys = build_baseline(hist_df)
-
-st.info("Baseline uses structural grouping: book + currency pair + tenor")
-
-# =====================================================
-# JOIN BASELINE (FIXED)
-# =====================================================
-daily_df = daily_df.join(
-    baseline_df,
-    on=baseline_keys,
-    how="left"
-)
-
-# =====================================================
-# FEATURES
-# =====================================================
-daily_df = daily_df.with_columns([
-    (pl.col("base_currency_prin_amount") /
-     pl.col("baseline_median_principal")).alias("principal_ratio"),
-
-    (pl.col("bui_value") == "BTB").fill_null(False).alias("is_btb")
-])
-
-# =====================================================
-# EXPLANATIONS
-# =====================================================
-daily_df = daily_df.with_columns(
-    pl.struct([
-        "principal_ratio",
-        "baseline_trade_count",
-        "is_btb"
-    ]).map_elements(explain).alias("execution_explanation")
-)
-
-# =====================================================
-# OUTPUT
-# =====================================================
-st.header("3️⃣ Execution Context Output")
-
-display_cols = [
-    "trade_id",
-    "book",
-    "ccy_pair",
-    "tenor",
-    "base_currency_prin_amount",
-    "baseline_median_principal",
-    "baseline_trade_count",
-    "execution_explanation"
-]
-
-st.dataframe(
-    daily_df.select([c for c in display_cols if c in daily_df.columns]).head(500),
-    use_container_width=True
-)
-
-# =====================================================
-# SUMMARY
-# =====================================================
-st.header("4️⃣ Summary")
-
-st.metric(
-    "Trades with historical reference",
-    daily_df.filter(pl.col("baseline_trade_count").is_not_null()).height
-)
-
-st.metric(
-    "Back-to-Back Trades",
-    daily_df.filter(pl.col("is_btb")).height
-)
-
-st.metric(
-    "Elevated Notional Trades",
-    daily_df.filter(pl.col("principal_ratio") > 3).height
-)
-
-st.success("Daily inference completed successfully")
