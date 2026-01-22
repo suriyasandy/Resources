@@ -251,7 +251,7 @@ alerts_df = alerts_df.with_columns(
         + pl.lit("): ")
         + pl.col("peer_median_dev").round(2).cast(pl.Utf8)
         + pl.lit("% | Example peer trade_ids: ")
-        + pl.col("peer_trade_ids").cast(pl.Utf8)
+        + pl.col("peer_trade_ids_str")
         + pl.lit(" | Desk (BUI): ")
         + pl.col("bui_value")
         + pl.lit(" | BTB: ")
