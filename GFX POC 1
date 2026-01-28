@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("OMRC – Alert Closure Evidence (Historical + Daily)")
-st.caption("Historical baseline + daily run | OMRC-safe design")
+st.caption("Historical baseline + daily run | OMRC-safe")
 
 # =====================================================
 # CONFIG
@@ -33,7 +33,8 @@ peer_keys = ["ccy_pair", "product", "trade_type", "bui_value"]
 def csv_to_parquet(csv_path: Path) -> Path:
     pq = CACHE_DIR / f"{csv_path.stem}.parquet"
     if not pq.exists():
-        pl.scan_csv(csv_path, infer_schema_length=10000).collect().write_parquet(pq)
+        with st.spinner(f"Converting {csv_path.name} → Parquet"):
+            pl.scan_csv(csv_path, infer_schema_length=10000).collect().write_parquet(pq)
     return pq
 
 
@@ -80,13 +81,21 @@ if not hist_path or not daily_path:
 hist_path = Path(hist_path)
 daily_path = Path(daily_path)
 
+if not hist_path.exists() or not daily_path.exists():
+    st.error("One or more file paths do not exist")
+    st.stop()
+
 # =====================================================
 # LOAD HISTORICAL BASELINE
 # =====================================================
 hist_df = pl.read_parquet(csv_to_parquet(hist_path))
 hist_df = parse_dates(hist_df)
-hist_df = hist_df.filter(pl.col("alert_description").is_null())
-hist_df = compute_deviation(hist_df)
+
+hist_df = (
+    hist_df
+    .filter(pl.col("alert_description").is_null())
+    .pipe(compute_deviation)
+)
 
 hist_baseline = (
     hist_df
@@ -98,7 +107,7 @@ hist_baseline = (
     ])
 )
 
-st.success("Historical baseline loaded")
+st.success("Historical baseline created")
 
 # =====================================================
 # LOAD DAILY FILE
@@ -111,7 +120,7 @@ alerts_df = df.filter(pl.col("alert_description").is_not_null())
 passed_df = df.filter(pl.col("alert_description").is_null())
 
 # =====================================================
-# SAME-DAY PEERS (DAILY FILE ONLY)
+# SAME-DAY PEERS (DAILY ONLY)
 # =====================================================
 same_day_peers = (
     passed_df
@@ -153,10 +162,12 @@ alerts_df = alerts_df.with_columns([
 ])
 
 # =====================================================
-# FLATTEN IDS
+# FLATTEN PEER IDS (CSV SAFE)
 # =====================================================
 alerts_df = alerts_df.with_columns(
-    pl.col("peer_trade_ids").list.join(", ").fill_null("N/A")
+    pl.when(pl.col("peer_trade_ids").is_null())
+    .then(pl.lit("N/A"))
+    .otherwise(pl.col("peer_trade_ids").list.join(", "))
     .alias("peer_trade_ids_str")
 )
 
@@ -165,8 +176,12 @@ alerts_df = alerts_df.with_columns(
 # =====================================================
 alerts_df = alerts_df.with_columns(
     pl.when(
-        pl.col("computed_deviation_percent") <= pl.col("peer_median_dev") * 1.2
-    ).then(1).otherwise(0).alias("fp_like_flag")
+        (pl.col("peer_median_dev").is_not_null()) &
+        (pl.col("computed_deviation_percent") <= pl.col("peer_median_dev") * 1.2)
+    )
+    .then(1)
+    .otherwise(0)
+    .alias("fp_like_flag")
 )
 
 # =====================================================
@@ -176,7 +191,7 @@ alerts_df = alerts_df.with_columns(
     (
         pl.lit("Deviation consistent with ")
         + pl.col("peer_reference_type")
-        + pl.lit(" peer behaviour. Peer trades: ")
+        + pl.lit(" peer behaviour. Example peer trades: ")
         + pl.col("peer_trade_ids_str")
         + pl.lit(". Observed deviation: ")
         + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
@@ -185,13 +200,14 @@ alerts_df = alerts_df.with_columns(
 )
 
 # =====================================================
-# DISPLAY & EXPORT
+# DISPLAY
 # =====================================================
 st.header("Sample Closure Evidence")
 
 st.dataframe(
     alerts_df.select([
         "trade_id",
+        "trade_datetime",
         "bui_value",
         "alert_description",
         "peer_reference_type",
@@ -201,10 +217,20 @@ st.dataframe(
     use_container_width=True
 )
 
+# =====================================================
+# CSV SAFE EXPORT (DROP NESTED DATA)
+# =====================================================
+csv_safe_df = alerts_df.drop([
+    "sd_peer_trade_ids",
+    "hist_peer_trade_ids",
+    "peer_trade_ids"
+])
+
 st.download_button(
     "Download Closure Evidence (CSV)",
-    alerts_df.drop("peer_trade_ids").write_csv(),
-    file_name="omrc_daily_closure_evidence.csv"
+    csv_safe_df.write_csv(),
+    file_name="omrc_daily_closure_evidence.csv",
+    mime="text/csv"
 )
 
-st.success("Daily OMRC analysis completed using historical baseline")
+st.success("OMRC daily analysis completed successfully")
