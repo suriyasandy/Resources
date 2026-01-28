@@ -8,14 +8,12 @@ from sklearn.preprocessing import StandardScaler
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="OMRC – FX Price Deviation Closure Platform",
+    page_title="OMRC – FX Deviation Closure Platform",
     layout="wide"
 )
 
-st.title("OMRC – Price / PnL Deviation Closure Evidence")
-st.caption(
-    "Passed-trade peers | Time-window aware | Desk = BUI | ML for grouping only"
-)
+st.title("OMRC – Alert Closure Evidence (Historical + Daily)")
+st.caption("Historical baseline + daily run | OMRC-safe design")
 
 # =====================================================
 # CONFIG
@@ -26,44 +24,20 @@ CACHE_DIR.mkdir(exist_ok=True)
 DATE_FORMAT = "%d/%m/%Y %H:%M:%S%.f"
 MIN_PEERS = 5
 MAX_PEER_TRADE_IDS = 3
-TIME_WINDOW_MINUTES = 5
 
-REQUIRED_COLS = [
-    "trade_id",
-    "trade_date",
-    "bui_value",
-    "ccy_pair",
-    "product",
-    "trade_type",
-    "alert_description",
-    "market_rate",
-    "quoted_market_rate",
-    "base_threshold_percent",
-    "deviation_percent",
-    "back_to_back_book",
-    "risk_book",
-]
+peer_keys = ["ccy_pair", "product", "trade_type", "bui_value"]
 
 # =====================================================
 # HELPERS
 # =====================================================
-def convert_csv_to_parquet(csv_path: Path) -> Path:
+def csv_to_parquet(csv_path: Path) -> Path:
     pq = CACHE_DIR / f"{csv_path.stem}.parquet"
-    if pq.exists():
-        return pq
-    with st.spinner("Converting CSV → Parquet (one-time)…"):
+    if not pq.exists():
         pl.scan_csv(csv_path, infer_schema_length=10000).collect().write_parquet(pq)
     return pq
 
 
-def ensure_columns(df):
-    for c in REQUIRED_COLS:
-        if c not in df.columns:
-            df = df.with_columns(pl.lit(None).alias(c))
-    return df
-
-
-def parse_trade_date(df):
+def parse_dates(df):
     return (
         df.with_columns(
             pl.col("trade_date")
@@ -77,103 +51,67 @@ def parse_trade_date(df):
 
 def compute_deviation(df):
     return df.with_columns(
-        pl.when(pl.col("deviation_percent").is_null())
-        .then(
-            (pl.col("quoted_market_rate") - pl.col("market_rate")).abs()
-            / pl.col("market_rate") * 100
-        )
-        .otherwise(pl.col("deviation_percent"))
-        .alias("computed_deviation_percent")
-    )
-
-
-def add_btb_flag(df):
-    return df.with_columns(
-        pl.when(
-            (pl.col("bui_value") == "BTB") |
-            (pl.col("back_to_back_book") != pl.col("risk_book"))
-        )
-        .then(pl.lit(1))
-        .otherwise(pl.lit(0))
-        .alias("is_btb_trade")
+        (
+            (pl.col("quoted_market_rate") - pl.col("market_rate"))
+            .abs() / pl.col("market_rate") * 100
+        ).alias("computed_deviation_percent")
     )
 
 # =====================================================
-# INPUT
+# INPUTS
 # =====================================================
-st.header("1️⃣ Provide OMRC Rule Engine CSV Path")
+st.header("1️⃣ Historical Reference Data")
 
-csv_path_input = st.text_input(
-    "Full path to rule-engine CSV",
-    placeholder="C:/data/GFX_RULE_ENGINE_20260116.csv"
+hist_path = st.text_input(
+    "Historical OMRC CSV (past days / weeks)",
+    placeholder="C:/data/GFX_OMRC_HISTORY.csv"
 )
 
-if not csv_path_input:
+st.header("2️⃣ Daily OMRC File")
+
+daily_path = st.text_input(
+    "Today's OMRC CSV",
+    placeholder="C:/data/GFX_OMRC_TODAY.csv"
+)
+
+if not hist_path or not daily_path:
     st.stop()
 
-csv_path = Path(csv_path_input)
-if not csv_path.exists():
-    st.error("File path does not exist")
-    st.stop()
+hist_path = Path(hist_path)
+daily_path = Path(daily_path)
 
 # =====================================================
-# LOAD DATA
+# LOAD HISTORICAL BASELINE
 # =====================================================
-pq_path = convert_csv_to_parquet(csv_path)
+hist_df = pl.read_parquet(csv_to_parquet(hist_path))
+hist_df = parse_dates(hist_df)
+hist_df = hist_df.filter(pl.col("alert_description").is_null())
+hist_df = compute_deviation(hist_df)
 
-df = pl.read_parquet(pq_path)
-df = ensure_columns(df)
-df = parse_trade_date(df)
+hist_baseline = (
+    hist_df
+    .group_by(peer_keys)
+    .agg([
+        pl.median("computed_deviation_percent").alias("hist_peer_median_dev"),
+        pl.count().alias("hist_peer_trade_count"),
+        pl.col("trade_id").head(MAX_PEER_TRADE_IDS).alias("hist_peer_trade_ids")
+    ])
+)
 
-st.success(f"Loaded {df.height:,} trades")
+st.success("Historical baseline loaded")
 
 # =====================================================
-# SPLIT ALERT / PASSED
+# LOAD DAILY FILE
 # =====================================================
+df = pl.read_parquet(csv_to_parquet(daily_path))
+df = parse_dates(df)
+df = compute_deviation(df)
+
 alerts_df = df.filter(pl.col("alert_description").is_not_null())
 passed_df = df.filter(pl.col("alert_description").is_null())
 
 # =====================================================
-# FEATURE ENGINEERING
-# =====================================================
-alerts_df = compute_deviation(alerts_df)
-alerts_df = add_btb_flag(alerts_df)
-
-alerts_df = alerts_df.with_columns(
-    (pl.col("computed_deviation_percent") - pl.col("base_threshold_percent"))
-    .alias("breach_amount_percent")
-)
-
-passed_df = compute_deviation(passed_df)
-
-# =====================================================
-# PEER KEYS
-# =====================================================
-peer_keys = ["ccy_pair", "product", "trade_type", "bui_value"]
-
-# =====================================================
-# TIME-WINDOW PEERS (PASSED TRADES)
-# =====================================================
-passed_df = passed_df.with_columns(
-    pl.col("trade_datetime").dt.truncate("5m").alias("time_bucket")
-)
-
-alerts_df = alerts_df.with_columns(
-    pl.col("trade_datetime").dt.truncate("5m").alias("time_bucket")
-)
-
-time_peers = (
-    passed_df
-    .group_by(peer_keys + ["trade_date_only", "time_bucket"])
-    .agg([
-        pl.median("computed_deviation_percent").alias("tw_peer_median_dev"),
-        pl.count().alias("tw_peer_trade_count"),
-        pl.col("trade_id").head(MAX_PEER_TRADE_IDS).alias("tw_peer_trade_ids")
-    ])
-)
-
-# =====================================================
-# SAME-DAY PEERS
+# SAME-DAY PEERS (DAILY FILE ONLY)
 # =====================================================
 same_day_peers = (
     passed_df
@@ -186,81 +124,49 @@ same_day_peers = (
 )
 
 # =====================================================
-# HISTORICAL PEERS
+# JOIN BASELINES
 # =====================================================
-hist_peers = (
-    passed_df
-    .group_by(peer_keys)
-    .agg([
-        pl.median("computed_deviation_percent").alias("hist_peer_median_dev"),
-        pl.count().alias("hist_peer_trade_count"),
-        pl.col("trade_id").head(MAX_PEER_TRADE_IDS).alias("hist_peer_trade_ids")
-    ])
+alerts_df = (
+    alerts_df
+    .join(same_day_peers, on=peer_keys + ["trade_date_only"], how="left")
+    .join(hist_baseline, on=peer_keys, how="left")
 )
 
 # =====================================================
-# JOIN ALL PEERS
-# =====================================================
-alerts_df = alerts_df.join(
-    time_peers,
-    on=peer_keys + ["trade_date_only", "time_bucket"],
-    how="left"
-).join(
-    same_day_peers,
-    on=peer_keys + ["trade_date_only"],
-    how="left"
-).join(
-    hist_peers,
-    on=peer_keys,
-    how="left"
-)
-
-# =====================================================
-# SELECT BEST PEER REFERENCE
+# SELECT PEER SOURCE
 # =====================================================
 alerts_df = alerts_df.with_columns([
-    pl.when(pl.col("tw_peer_trade_count") >= MIN_PEERS)
-    .then(pl.col("tw_peer_median_dev"))
-    .when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
+    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.col("sd_peer_median_dev"))
     .otherwise(pl.col("hist_peer_median_dev"))
     .alias("peer_median_dev"),
 
-    pl.when(pl.col("tw_peer_trade_count") >= MIN_PEERS)
-    .then(pl.col("tw_peer_trade_ids"))
-    .when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
+    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.col("sd_peer_trade_ids"))
     .otherwise(pl.col("hist_peer_trade_ids"))
     .alias("peer_trade_ids"),
 
-    pl.when(pl.col("tw_peer_trade_count") >= MIN_PEERS)
-    .then(pl.lit("TIME_WINDOW"))
-    .when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
+    pl.when(pl.col("sd_peer_trade_count") >= MIN_PEERS)
     .then(pl.lit("SAME_DAY"))
     .otherwise(pl.lit("HISTORICAL"))
     .alias("peer_reference_type")
 ])
 
 # =====================================================
-# FLATTEN PEER IDS
+# FLATTEN IDS
 # =====================================================
 alerts_df = alerts_df.with_columns(
-    pl.when(pl.col("peer_trade_ids").is_null())
-    .then(pl.lit("N/A"))
-    .otherwise(pl.col("peer_trade_ids").list.join(", "))
+    pl.col("peer_trade_ids").list.join(", ").fill_null("N/A")
     .alias("peer_trade_ids_str")
 )
 
 # =====================================================
-# FALSE POSITIVE INDICATOR
+# FP-LIKE FLAG
 # =====================================================
 alerts_df = alerts_df.with_columns(
     pl.when(
         pl.col("computed_deviation_percent") <= pl.col("peer_median_dev") * 1.2
-    )
-    .then(pl.lit(1))
-    .otherwise(pl.lit(0))
-    .alias("fp_like_flag")
+    ).then(1).otherwise(0).alias("fp_like_flag")
 )
 
 # =====================================================
@@ -268,75 +174,37 @@ alerts_df = alerts_df.with_columns(
 # =====================================================
 alerts_df = alerts_df.with_columns(
     (
-        pl.lit("Price deviation is consistent with ")
+        pl.lit("Deviation consistent with ")
         + pl.col("peer_reference_type")
-        + pl.lit(" peer executions. Example peer trade IDs: ")
+        + pl.lit(" peer behaviour. Peer trades: ")
         + pl.col("peer_trade_ids_str")
-        + pl.lit(". Deviation observed: ")
+        + pl.lit(". Observed deviation: ")
         + pl.col("computed_deviation_percent").round(2).cast(pl.Utf8)
-        + pl.lit("% vs threshold ")
-        + pl.col("base_threshold_percent").cast(pl.Utf8)
-        + pl.lit("%. Desk (BUI): ")
-        + pl.col("bui_value")
+        + pl.lit("%.")
     ).alias("closure_evidence")
 )
 
 # =====================================================
-# ML CLUSTERING (SIMILARITY ONLY)
-# =====================================================
-cluster_features = [
-    "computed_deviation_percent",
-    "breach_amount_percent",
-    "is_btb_trade"
-]
-
-cluster_input = alerts_df.select(["trade_id"] + cluster_features).drop_nulls()
-
-if cluster_input.height >= 10:
-    X = cluster_input.select(cluster_features).to_numpy()
-    X = StandardScaler().fit_transform(X)
-
-    labels = KMeans(n_clusters=3, random_state=42, n_init=10).fit_predict(X)
-
-    alerts_df = alerts_df.join(
-        pl.DataFrame({"trade_id": cluster_input["trade_id"], "alert_cluster": labels}),
-        on="trade_id",
-        how="left"
-    )
-
-# =====================================================
-# DISPLAY
+# DISPLAY & EXPORT
 # =====================================================
 st.header("Sample Closure Evidence")
 
 st.dataframe(
     alerts_df.select([
         "trade_id",
-        "trade_datetime",
         "bui_value",
         "alert_description",
         "peer_reference_type",
-        "peer_trade_ids_str",
+        "fp_like_flag",
         "closure_evidence"
-    ]).head(500),
+    ]).head(300),
     use_container_width=True
 )
 
-# =====================================================
-# CSV SAFE EXPORT
-# =====================================================
-csv_safe_df = alerts_df.drop([
-    "tw_peer_trade_ids",
-    "sd_peer_trade_ids",
-    "hist_peer_trade_ids",
-    "peer_trade_ids"
-])
-
 st.download_button(
     "Download Closure Evidence (CSV)",
-    csv_safe_df.write_csv(),
-    file_name="omrc_fx_price_deviation_closure.csv",
-    mime="text/csv"
+    alerts_df.drop("peer_trade_ids").write_csv(),
+    file_name="omrc_daily_closure_evidence.csv"
 )
 
-st.success("OMRC price deviation closure evidence generated successfully")
+st.success("Daily OMRC analysis completed using historical baseline")
