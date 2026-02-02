@@ -2,110 +2,137 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import numpy as np
-from math import ceil
+from math import floor
 from datetime import datetime
 import os
 
-# ==============================
+# =====================================================
 # CONFIG
-# ==============================
-MIN_SAMPLE = 300
+# =====================================================
 MAX_SAMPLE = 350
-EXPORT_DIR = "QA_Sampling_Output"
+EXPORT_DIR = "QA_Sampling_Exports"
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
-# ==============================
-# CORE SAMPLING LOGIC
-# ==============================
-def build_strata(df, cols):
-    df["_STRATUM_"] = df[cols].astype(str).agg(" | ".join, axis=1)
+# =====================================================
+# CORE LOGIC
+# =====================================================
+
+def build_strata(df, cols, name):
+    df[name] = df[cols].astype(str).agg(" | ".join, axis=1)
     return df
 
-def target_sample_size(strata_count):
-    return min(MAX_SAMPLE, max(MIN_SAMPLE, strata_count))
+def get_full_stratum_stats(df):
+    return (
+        df.groupby("_FULL_STRATUM_")
+          .size()
+          .reset_index(name="records")
+          .sort_values("records", ascending=False)
+          .reset_index(drop=True)
+    )
 
-def neyman_allocation_strict(stats, total_records, target_n):
-    """
-    STRICT allocation:
-    - If strata <= target_n → every stratum gets at least 1
-    - Remaining samples distributed proportionally by risk
-    - NO stratum can ever drop below 1
-    """
+def allocate_samples(df, full_stats, mandatory_cols):
+    total_records = len(df)
+    full_strata_count = len(full_stats)
 
-    strata_count = len(stats)
+    # -------------------------------------------------
+    # CASE 1: Full strata > MAX_SAMPLE
+    # -------------------------------------------------
+    if full_strata_count > MAX_SAMPLE:
+        # Mandatory baseline
+        df = build_strata(df, mandatory_cols, "_MANDATORY_STRATUM_")
 
-    # Risk weight
-    stats["risk_weight"] = stats["records"] / total_records
+        mandatory_stats = (
+            df.groupby("_MANDATORY_STRATUM_")
+              .size()
+              .reset_index(name="records")
+              .sort_values("records", ascending=False)
+              .reset_index(drop=True)
+        )
 
-    # ---------- CASE 1: FULL STRATA COVERAGE ----------
-    if strata_count <= target_n:
-        # Step 1: baseline = 1 per stratum
-        stats["sample_alloc"] = 1
+        mandatory_stats["sample_alloc"] = 1
+        mandatory_used = len(mandatory_stats)
+        remaining = max(0, MAX_SAMPLE - mandatory_used)
 
-        remaining = target_n - strata_count
-        if remaining > 0:
-            # Step 2: proportional top-up
-            stats["extra"] = (stats["risk_weight"] * remaining).round().astype(int)
+        # Risk-based allocation on FULL strata
+        full_stats = full_stats.copy()
+        full_stats["risk_weight"] = full_stats["records"] / total_records
+        full_stats["sample_alloc"] = floor_allocation(
+            full_stats["risk_weight"], remaining
+        )
 
-            # Fix rounding drift
-            drift = remaining - stats["extra"].sum()
-            if drift > 0:
-                stats.loc[
-                    stats.sort_values("records", ascending=False).head(drift).index,
-                    "extra"
-                ] += 1
+        return mandatory_stats, full_stats
 
-            stats["sample_alloc"] += stats["extra"]
-            stats.drop(columns=["extra"], inplace=True)
+    # -------------------------------------------------
+    # CASE 2: Full strata ≤ MAX_SAMPLE
+    # -------------------------------------------------
+    full_stats = full_stats.copy()
+    full_stats["sample_alloc"] = 1
+    remaining = MAX_SAMPLE - full_strata_count
 
-        return stats
+    if remaining > 0:
+        full_stats["risk_weight"] = full_stats["records"] / total_records
+        full_stats["sample_alloc"] += floor_allocation(
+            full_stats["risk_weight"], remaining
+        )
 
-    # ---------- CASE 2: PARTIAL COVERAGE ----------
-    stats["sample_alloc"] = (stats["risk_weight"] * target_n).round().astype(int)
-    stats.loc[stats["sample_alloc"] < 1, "sample_alloc"] = 1
+    return None, full_stats
 
-    # Adjust only if we exceeded target
-    diff = stats["sample_alloc"].sum() - target_n
-    if diff > 0:
-        reducible = stats[stats["sample_alloc"] > 1].sort_toggle("records")
-        for idx in reducible.index:
-            if diff == 0:
-                break
-            stats.at[idx, "sample_alloc"] -= 1
-            diff -= 1
+def floor_allocation(weights, total):
+    alloc = (weights * total).apply(np.floor).astype(int)
+    drift = total - alloc.sum()
 
-    return stats
+    if drift > 0:
+        alloc.iloc[:drift] += 1
 
-def stratified_sample(df, allocation):
-    sampled_idx = []
+    return alloc
 
-    for _, row in allocation.iterrows():
-        pool = df[df["_STRATUM_"] == row["_STRATUM_"]]
+def perform_sampling(df, mandatory_alloc, full_alloc):
+    sampled_idx = set()
+
+    # Mandatory samples
+    if mandatory_alloc is not None:
+        for _, row in mandatory_alloc.iterrows():
+            pool = df[df["_MANDATORY_STRATUM_"] == row["_MANDATORY_STRATUM_"]]
+            sampled_idx.add(pool.sample(1, random_state=42).index[0])
+
+    # Full stratum samples
+    for _, row in full_alloc.iterrows():
+        if row["sample_alloc"] <= 0:
+            continue
+
+        pool = df[df["_FULL_STRATUM_"] == row["_FULL_STRATUM_"]]
         take = min(row["sample_alloc"], len(pool))
-        sampled_idx.extend(pool.sample(take, random_state=42).index)
+        sampled_idx.update(pool.sample(take, random_state=42).index)
 
-    sampled = df.loc[sampled_idx]
-    unsampled = df.drop(sampled_idx)
-    return sampled, unsampled
+    sampled = df.loc[list(sampled_idx)]
 
-# ==============================
-# TKINTER QA TOOL
-# ==============================
-class QASamplingApp:
+    unsampled_strata = sorted(
+        set(df["_FULL_STRATUM_"].unique()) -
+        set(sampled["_FULL_STRATUM_"].unique())
+    )
+
+    return sampled, unsampled_strata
+
+# =====================================================
+# TKINTER APP
+# =====================================================
+
+class QAOpsSamplingApp:
 
     def __init__(self, root):
         self.root = root
-        root.title("QA Risk-Based Sampling Tool (Ops Ready)")
-        root.geometry("1650x900")
+        root.title("QA / Ops Risk-Based Sampling Tool")
+        root.geometry("1700x950")
 
         self.df = None
         self.sampled = None
-        self.unsampled = None
-        self.stats = None
+        self.unsampled_strata = None
+        self.full_stats = None
+        self.mandatory_stats = None
 
         self.build_ui()
 
-    # --------------------------
+    # -------------------------------------------------
     def build_ui(self):
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True)
@@ -116,7 +143,7 @@ class QASamplingApp:
         self.tab_docs = ttk.Frame(nb)
 
         nb.add(self.tab_data, text="📊 Data & Strata")
-        nb.add(self.tab_results, text="📈 Sampling Results")
+        nb.add(self.tab_results, text="📈 Results")
         nb.add(self.tab_export, text="💾 Export")
         nb.add(self.tab_docs, text="📘 Methodology")
 
@@ -125,7 +152,7 @@ class QASamplingApp:
         self.build_tab_export()
         self.build_tab_docs()
 
-    # --------------------------
+    # -------------------------------------------------
     def build_tab_data(self):
         top = ttk.Frame(self.tab_data, padding=10)
         top.pack(fill="x")
@@ -140,7 +167,7 @@ class QASamplingApp:
         self.product_cb = ttk.Combobox(top, width=18)
         self.product_cb.pack(side="left")
 
-        ttk.Button(top, text="Run QA Sampling", command=self.run_sampling).pack(side="right")
+        ttk.Button(top, text="Run Sampling", command=self.run_sampling).pack(side="right")
 
         mid = ttk.Frame(self.tab_data)
         mid.pack(fill="both", expand=True)
@@ -163,50 +190,53 @@ class QASamplingApp:
         vsb.pack(side="right", fill="y")
         hsb.pack(side="bottom", fill="x")
 
-    # --------------------------
+    # -------------------------------------------------
     def build_tab_results(self):
         top = ttk.Frame(self.tab_results, padding=10)
         top.pack(fill="x")
 
-        self.summary = tk.Text(top, height=6, font=("Courier", 10))
+        self.summary = tk.Text(top, height=7, font=("Courier", 10))
         self.summary.pack(fill="x")
 
-        bottom = ttk.LabelFrame(self.tab_results, text="Stratum Risk Allocation")
-        bottom.pack(fill="both", expand=True)
-
-        self.table = ttk.Treeview(bottom)
-        vsb = ttk.Scrollbar(bottom, orient="vertical", command=self.table.yview)
+        self.table = ttk.Treeview(self.tab_results)
+        vsb = ttk.Scrollbar(self.tab_results, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=vsb.set)
 
         self.table.pack(fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-    # --------------------------
+    # -------------------------------------------------
     def build_tab_export(self):
         frame = ttk.Frame(self.tab_export, padding=10)
-        frame.pack(fill="both", expand=True)
+        frame.pack(fill="x")
 
-        ttk.Button(frame, text="Export QA Outputs", command=self.export_all).pack()
-        self.export_log = tk.Text(frame, height=10)
+        ttk.Button(frame, text="Export Sampled Records", command=self.export_sampled).pack(side="left", padx=5)
+        ttk.Button(frame, text="Export Stratum Stats", command=self.export_stats).pack(side="left", padx=5)
+        ttk.Button(frame, text="Export Unsampled Strata", command=self.export_unsampled).pack(side="left", padx=5)
+        ttk.Button(frame, text="Export Mandatory Coverage", command=self.export_mandatory).pack(side="left", padx=5)
+
+        self.export_log = tk.Text(self.tab_export, height=10)
         self.export_log.pack(fill="both", expand=True)
 
-    # --------------------------
+    # -------------------------------------------------
     def build_tab_docs(self):
         text = tk.Text(self.tab_docs, font=("Courier", 10))
         text.pack(fill="both", expand=True)
         text.insert("end", """
-QA SAMPLING METHODOLOGY (OPS APPROVED)
+QA / OPS SAMPLING METHODOLOGY
 
-1. Mandatory Region + Product stratification
-2. Optional additional dimensions increase strata
-3. One sample minimum per stratum (coverage guarantee)
-4. Expected sample size between 300–350
-5. Neyman proportional allocation by population
-6. Controlled random sampling within each stratum
-7. Fully auditable & reproducible
+CASE 1: Full strata > Max sample
+• 1 sample per mandatory stratum (Region + Product)
+• Remaining samples allocated by Neyman risk on full strata
+• Unsampled full strata explicitly reported
+
+CASE 2: Full strata ≤ Max sample
+• 1 sample per full stratum
+• Remaining samples allocated proportionally
+• 100% stratum coverage guaranteed
 """)
 
-    # --------------------------
+    # -------------------------------------------------
     def load_data(self):
         path = filedialog.askopenfilename(filetypes=[("CSV / Excel", "*.csv *.xlsx")])
         if not path:
@@ -226,7 +256,7 @@ QA SAMPLING METHODOLOGY (OPS APPROVED)
 
         self.show_preview(self.df.head(200))
 
-    # --------------------------
+    # -------------------------------------------------
     def show_preview(self, df):
         self.preview.delete(*self.preview.get_children())
         self.preview["columns"] = list(df.columns)
@@ -239,7 +269,7 @@ QA SAMPLING METHODOLOGY (OPS APPROVED)
         for _, row in df.iterrows():
             self.preview.insert("", "end", values=list(row))
 
-    # --------------------------
+    # -------------------------------------------------
     def run_sampling(self):
         region = self.region_cb.get()
         product = self.product_cb.get()
@@ -254,53 +284,64 @@ QA SAMPLING METHODOLOGY (OPS APPROVED)
             if self.additional_lb.get(i) not in (region, product)
         ]
 
-        df = build_strata(self.df.copy(), [region, product] + additional)
-        stats = df.groupby("_STRATUM_").size().reset_index(name="records")
+        df = self.df.copy()
+        df = build_strata(df, [region, product] + additional, "_FULL_STRATUM_")
 
-        target_n = target_sample_size(len(stats))
-        allocation = neyman_allocation(stats, len(df), target_n)
+        self.full_stats = get_full_stratum_stats(df)
+        self.mandatory_stats, full_alloc = allocate_samples(
+            df, self.full_stats, [region, product]
+        )
 
-        self.sampled, self.unsampled = stratified_sample(df, allocation)
-        self.stats = allocation
+        self.sampled, self.unsampled_strata = perform_sampling(
+            df, self.mandatory_stats, full_alloc
+        )
 
-        self.display_results()
+        self.display_results(full_alloc)
 
-    # --------------------------
-    def display_results(self):
+    # -------------------------------------------------
+    def display_results(self, full_alloc):
         self.summary.delete("1.0", tk.END)
         self.summary.insert("end", f"""
-TOTAL RECORDS      : {len(self.df)}
-TOTAL STRATA       : {len(self.stats)}
-TARGET SAMPLE SIZE : {target_sample_size(len(self.stats))}
-ACTUAL SAMPLE SIZE : {len(self.sampled)}
-UNSAMPLED RECORDS  : {len(self.unsampled)}
+TOTAL RECORDS        : {len(self.df)}
+FULL STRATA          : {len(self.full_stats)}
+SAMPLED RECORDS     : {len(self.sampled)}
+UNSAMPLED STRATA    : {len(self.unsampled_strata)}
 """)
 
         self.table.delete(*self.table.get_children())
-        self.table["columns"] = list(self.stats.columns)
+        self.table["columns"] = list(full_alloc.columns)
         self.table["show"] = "headings"
 
-        for c in self.stats.columns:
+        for c in full_alloc.columns:
             self.table.heading(c, text=c)
             self.table.column(c, width=220)
 
-        for _, row in self.stats.iterrows():
+        for _, row in full_alloc.iterrows():
             self.table.insert("", "end", values=list(row))
 
-    # --------------------------
-    def export_all(self):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # -------------------------------------------------
+    def export_sampled(self):
+        self.sampled.to_excel(f"{EXPORT_DIR}/sampled.xlsx", index=False)
+        self.export_log.insert("end", "Sampled records exported\n")
 
-        self.sampled.to_excel(f"{EXPORT_DIR}/sampled_{ts}.xlsx", index=False)
-        self.unsampled.to_excel(f"{EXPORT_DIR}/unsampled_{ts}.xlsx", index=False)
-        self.stats.to_excel(f"{EXPORT_DIR}/stratum_stats_{ts}.xlsx", index=False)
+    def export_stats(self):
+        self.full_stats.to_excel(f"{EXPORT_DIR}/stratum_stats.xlsx", index=False)
+        self.export_log.insert("end", "Stratum stats exported\n")
 
-        self.export_log.insert("end", "QA sampling outputs exported successfully\n")
+    def export_unsampled(self):
+        pd.DataFrame(self.unsampled_strata, columns=["Unsampled_Stratum"]) \
+          .to_excel(f"{EXPORT_DIR}/unsampled_strata.xlsx", index=False)
+        self.export_log.insert("end", "Unsampled strata exported\n")
 
-# ==============================
+    def export_mandatory(self):
+        if self.mandatory_stats is not None:
+            self.mandatory_stats.to_excel(f"{EXPORT_DIR}/mandatory_coverage.xlsx", index=False)
+            self.export_log.insert("end", "Mandatory coverage exported\n")
+
+# =====================================================
 # RUN
-# ==============================
+# =====================================================
 if __name__ == "__main__":
     root = tk.Tk()
-    QASamplingApp(root)
+    QAOpsSamplingApp(root)
     root.mainloop()
