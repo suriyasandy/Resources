@@ -1,52 +1,31 @@
-"""
-OMRC ENTERPRISE RISK-BASED SAMPLING TOOL
-Author: Internal Audit / AI-ML
-Pure Python + Tkinter
-"""
-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import numpy as np
 from math import ceil
-import json
-import os
 from datetime import datetime
-import logging
-import matplotlib.pyplot as plt
+import os
 
-# ===============================
+# =====================================================
 # CONFIG
-# ===============================
+# =====================================================
 MIN_SAMPLE = 300
 MAX_SAMPLE = 350
-OUTPUT_DIR = "OMRC_Exports"
-CONFIG_DIR = "OMRC_Config"
-LOG_DIR = "OMRC_AuditLogs"
+EXPORT_DIR = "OMRC_Output"
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(CONFIG_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
-
-logging.basicConfig(
-    filename=f"{LOG_DIR}/audit_{datetime.now().date()}.log",
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-# ===============================
+# =====================================================
 # CORE LOGIC
-# ===============================
-def create_strata(df, region, product, additional):
-    cols = [region, product] + additional
+# =====================================================
+def build_strata(df, cols):
     df["_STRATUM_"] = df[cols].astype(str).agg(" | ".join, axis=1)
     return df
 
-def proportional_sample_size(total_strata):
-    base = ceil(total_strata * 0.9)
+def calculate_sample_size(strata_count):
+    base = ceil(strata_count * 0.9)
     return max(MIN_SAMPLE, min(MAX_SAMPLE, base))
 
-def risk_scoring(df):
+def calculate_stratum_stats(df):
     stats = (
         df.groupby("_STRATUM_")
         .size()
@@ -55,140 +34,149 @@ def risk_scoring(df):
     )
     return stats
 
-def allocate_samples(stats, total_records, sample_size):
+def allocate_samples(stats, total_records, target):
     stats["sample_alloc"] = np.ceil(
-        (stats["records"] / total_records) * sample_size
+        (stats["records"] / total_records) * target
     ).astype(int)
 
     stats.loc[stats["sample_alloc"] < 1, "sample_alloc"] = 1
 
-    # adjust to bounds
-    diff = stats["sample_alloc"].sum() - sample_size
+    diff = stats["sample_alloc"].sum() - target
     if diff > 0:
         stats.loc[stats.index[:diff], "sample_alloc"] -= 1
 
     return stats
 
-def stratified_sampling(df, allocation):
+def perform_sampling(df, allocation):
     sampled_idx = []
-
     for _, row in allocation.iterrows():
-        stratum_rows = df[df["_STRATUM_"] == row["_STRATUM_"]]
-        sampled = stratum_rows.sample(
-            min(row["sample_alloc"], len(stratum_rows)),
-            random_state=42
-        )
-        sampled_idx.extend(sampled.index)
-
+        pool = df[df["_STRATUM_"] == row["_STRATUM_"]]
+        take = min(row["sample_alloc"], len(pool))
+        sampled_idx.extend(pool.sample(take, random_state=42).index)
     return df.loc[sampled_idx], df.drop(sampled_idx)
 
-# ===============================
+# =====================================================
 # TKINTER APP
-# ===============================
+# =====================================================
 class OMRCApp:
-
     def __init__(self, root):
         self.root = root
-        root.title("OMRC Enterprise Risk-Based Sampling")
-        root.geometry("1400x850")
+        root.title("OMRC Enterprise Risk-Based Sampling Tool")
+        root.geometry("1600x900")
 
         self.df = None
-        self.filtered_df = None
+        self.sampled = None
+        self.unsampled = None
+        self.stats = None
 
         self.build_ui()
 
-    # ---------------------------
+    # -------------------------------------------------
     def build_ui(self):
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True)
 
         self.tab_data = ttk.Frame(notebook)
-        self.tab_sampling = ttk.Frame(notebook)
         self.tab_results = ttk.Frame(notebook)
         self.tab_export = ttk.Frame(notebook)
         self.tab_docs = ttk.Frame(notebook)
 
-        notebook.add(self.tab_data, text="📊 Data & Config")
-        notebook.add(self.tab_sampling, text="🎯 Sampling")
+        notebook.add(self.tab_data, text="📊 Data & Configuration")
         notebook.add(self.tab_results, text="📈 Results")
         notebook.add(self.tab_export, text="💾 Export")
         notebook.add(self.tab_docs, text="📘 Methodology")
 
         self.build_tab_data()
-        self.build_tab_sampling()
         self.build_tab_results()
         self.build_tab_export()
         self.build_tab_docs()
 
-    # ---------------------------
+    # -------------------------------------------------
     def build_tab_data(self):
-        frame = ttk.Frame(self.tab_data, padding=10)
-        frame.pack(fill="both", expand=True)
+        top = ttk.Frame(self.tab_data, padding=10)
+        top.pack(fill="x")
 
-        ttk.Button(frame, text="Load Data", command=self.load_data).pack(anchor="w")
+        ttk.Button(top, text="Load Dataset", command=self.load_data).pack(side="left")
 
-        self.region_cb = ttk.Combobox(frame)
-        self.product_cb = ttk.Combobox(frame)
-        self.additional_lb = tk.Listbox(frame, selectmode="multiple", height=6)
+        self.region_cb = ttk.Combobox(top, width=20)
+        self.product_cb = ttk.Combobox(top, width=20)
 
-        ttk.Label(frame, text="Region (Mandatory)").pack(anchor="w")
-        self.region_cb.pack(anchor="w")
+        ttk.Label(top, text="Region").pack(side="left", padx=5)
+        self.region_cb.pack(side="left")
+        ttk.Label(top, text="Product").pack(side="left", padx=5)
+        self.product_cb.pack(side="left")
 
-        ttk.Label(frame, text="Product (Mandatory)").pack(anchor="w")
-        self.product_cb.pack(anchor="w")
+        ttk.Button(top, text="Run Sampling", command=self.run_sampling).pack(side="right")
 
-        ttk.Label(frame, text="Additional Columns").pack(anchor="w")
-        self.additional_lb.pack(anchor="w", fill="x")
+        mid = ttk.Frame(self.tab_data)
+        mid.pack(fill="both", expand=True)
 
-        self.preview = ttk.Treeview(frame)
+        left = ttk.LabelFrame(mid, text="Optional Additional Columns", padding=5)
+        left.pack(side="left", fill="y", padx=5)
+
+        self.additional_lb = tk.Listbox(left, selectmode="multiple", height=10)
+        self.additional_lb.pack(fill="y")
+
+        right = ttk.LabelFrame(mid, text="Dataset Preview (Top 200 rows)", padding=5)
+        right.pack(side="right", fill="both", expand=True)
+
+        self.preview = ttk.Treeview(right)
+        vsb = ttk.Scrollbar(right, orient="vertical", command=self.preview.yview)
+        hsb = ttk.Scrollbar(right, orient="horizontal", command=self.preview.xview)
+        self.preview.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
         self.preview.pack(fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
 
-    # ---------------------------
-    def build_tab_sampling(self):
-        frame = ttk.Frame(self.tab_sampling, padding=10)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Button(frame, text="Run Sampling", command=self.run_sampling).pack()
-        self.stats_text = tk.Text(frame, height=15)
-        self.stats_text.pack(fill="both", expand=True)
-
-    # ---------------------------
+    # -------------------------------------------------
     def build_tab_results(self):
-        frame = ttk.Frame(self.tab_results, padding=10)
-        frame.pack(fill="both", expand=True)
+        top = ttk.Frame(self.tab_results, padding=10)
+        top.pack(fill="x")
 
-        ttk.Button(frame, text="Show Risk Chart", command=self.plot_risk).pack()
-        self.result_text = tk.Text(frame)
-        self.result_text.pack(fill="both", expand=True)
+        self.stats_box = tk.Text(top, height=6, font=("Courier", 10))
+        self.stats_box.pack(fill="x")
 
-    # ---------------------------
+        bottom = ttk.Frame(self.tab_results)
+        bottom.pack(fill="both", expand=True)
+
+        self.results_table = ttk.Treeview(bottom)
+        vsb = ttk.Scrollbar(bottom, orient="vertical", command=self.results_table.yview)
+        self.results_table.configure(yscrollcommand=vsb.set)
+
+        self.results_table.pack(fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+    # -------------------------------------------------
     def build_tab_export(self):
         frame = ttk.Frame(self.tab_export, padding=10)
         frame.pack(fill="both", expand=True)
 
-        ttk.Button(frame, text="Export All", command=self.export_all).pack()
-        self.export_status = tk.Text(frame)
-        self.export_status.pack(fill="both", expand=True)
+        ttk.Button(frame, text="Export Sampled / Unsampled / Stats",
+                   command=self.export_all).pack()
 
-    # ---------------------------
+        self.export_log = tk.Text(frame, height=10)
+        self.export_log.pack(fill="both", expand=True)
+
+    # -------------------------------------------------
     def build_tab_docs(self):
-        text = tk.Text(self.tab_docs)
+        text = tk.Text(self.tab_docs, font=("Courier", 10))
         text.pack(fill="both", expand=True)
         text.insert("end", """
 SAMPLING METHODOLOGY
 ===================
 
-1. Mandatory stratification on Region + Product
-2. Optional additional dimensions
-3. Stratum creation using full combination
-4. Proportional risk scoring by population size
-5. Sample size bounded between 300–350
-6. Minimum one record per stratum
-7. Stratified random selection (controlled)
-8. Full audit logging & reproducibility
+• Mandatory stratification: Region + Product
+• Optional additional dimensions selected by user
+• Stratum = full combination of selected columns
+• Risk score proportional to stratum population
+• Total sample size bounded between 300 and 350
+• Minimum 1 record per stratum guaranteed
+• Stratified random sampling within each stratum
+• Full visibility of sampled and unsampled data
 """)
 
-    # ---------------------------
+    # -------------------------------------------------
     def load_data(self):
         path = filedialog.askopenfilename(filetypes=[("CSV / Excel", "*.csv *.xlsx")])
         if not path:
@@ -199,15 +187,16 @@ SAMPLING METHODOLOGY
 
         self.region_cb["values"] = cols
         self.product_cb["values"] = cols
+        self.region_cb.set(cols[0])
+        self.product_cb.set(cols[1])
 
         self.additional_lb.delete(0, tk.END)
         for c in cols:
             self.additional_lb.insert(tk.END, c)
 
         self.show_preview(self.df.head(200))
-        logging.info(f"Loaded dataset: {path}")
 
-    # ---------------------------
+    # -------------------------------------------------
     def show_preview(self, df):
         self.preview.delete(*self.preview.get_children())
         self.preview["columns"] = list(df.columns)
@@ -220,7 +209,7 @@ SAMPLING METHODOLOGY
         for _, row in df.iterrows():
             self.preview.insert("", "end", values=list(row))
 
-    # ---------------------------
+    # -------------------------------------------------
     def run_sampling(self):
         region = self.region_cb.get()
         product = self.product_cb.get()
@@ -235,47 +224,51 @@ SAMPLING METHODOLOGY
             if self.additional_lb.get(i) not in (region, product)
         ]
 
-        df = create_strata(self.df.copy(), region, product, additional)
-        stats = risk_scoring(df)
+        df = build_strata(self.df.copy(), [region, product] + additional)
+        stats = calculate_stratum_stats(df)
 
-        sample_size = proportional_sample_size(len(stats))
-        allocation = allocate_samples(stats, len(df), sample_size)
+        target = calculate_sample_size(len(stats))
+        allocation = allocate_samples(stats, len(df), target)
 
-        sampled, unsampled = stratified_sampling(df, allocation)
-
-        self.sampled = sampled
-        self.unsampled = unsampled
+        self.sampled, self.unsampled = perform_sampling(df, allocation)
         self.stats = allocation
 
-        self.stats_text.delete("1.0", tk.END)
-        self.stats_text.insert("end", f"""
-Total Records      : {len(df)}
-Total Strata       : {len(stats)}
-Final Sample Size  : {len(sampled)}
-Unsampled Strata   : {len(stats) - allocation.shape[0]}
+        self.show_results()
+
+    # -------------------------------------------------
+    def show_results(self):
+        self.stats_box.delete("1.0", tk.END)
+        self.stats_box.insert("end", f"""
+TOTAL RECORDS  : {len(self.df)}
+TOTAL STRATA   : {len(self.stats)}
+SAMPLE SIZE    : {len(self.sampled)}
+UNSAMPLED RECS : {len(self.unsampled)}
 """)
 
-        logging.info("Sampling completed")
+        self.results_table.delete(*self.results_table.get_children())
+        self.results_table["columns"] = list(self.stats.columns)
+        self.results_table["show"] = "headings"
 
-    # ---------------------------
-    def plot_risk(self):
-        self.stats.set_index("_STRATUM_")["records"].plot(kind="bar", figsize=(10,4))
-        plt.tight_layout()
-        plt.show()
+        for c in self.stats.columns:
+            self.results_table.heading(c, text=c)
+            self.results_table.column(c, width=200)
 
-    # ---------------------------
+        for _, row in self.stats.iterrows():
+            self.results_table.insert("", "end", values=list(row))
+
+    # -------------------------------------------------
     def export_all(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.sampled.to_excel(f"{OUTPUT_DIR}/sampled_{ts}.xlsx", index=False)
-        self.unsampled.to_excel(f"{OUTPUT_DIR}/unsampled_{ts}.xlsx", index=False)
-        self.stats.to_excel(f"{OUTPUT_DIR}/stratum_stats_{ts}.xlsx", index=False)
 
-        self.export_status.insert("end", "Export completed\n")
-        logging.info("Export completed")
+        self.sampled.to_excel(f"{EXPORT_DIR}/sampled_{ts}.xlsx", index=False)
+        self.unsampled.to_excel(f"{EXPORT_DIR}/unsampled_{ts}.xlsx", index=False)
+        self.stats.to_excel(f"{EXPORT_DIR}/stratum_stats_{ts}.xlsx", index=False)
 
-# ===============================
+        self.export_log.insert("end", "Export completed successfully\n")
+
+# =====================================================
 # RUN
-# ===============================
+# =====================================================
 if __name__ == "__main__":
     root = tk.Tk()
     OMRCApp(root)
