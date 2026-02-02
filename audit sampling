@@ -1,1277 +1,276 @@
+#!/usr/bin/env python3
 """
-OMRC RISK-BASED AUDIT SAMPLING TOOL v10.0 - COMPLETE END-TO-END
-Production-Ready Python Application with Tabular Display & Auto-Adjusted Sample Size
-
-KEY FEATURES v10.0:
-✅ TABULAR PREVIEW in Tab 1 (Data & Configuration)
-✅ TABULAR DISPLAY in Tab 3 (Sampling & Results)
-✅ AUTO-ADJUSTED SAMPLE SIZE based on strata count
-✅ Additional columns FULLY INTEGRATED into stratum creation
-✅ FAST EXPORT: 3 files in < 2 seconds (Stratum, Risk, Sampled Data)
-✅ Missed strata detection and highlighted display
-✅ Risk analysis sorted DESCENDING by risk score
-✅ Comprehensive audit methodology documentation
-✅ Cochran's formula, Neyman allocation, MUS basis explained
-✅ All selected columns included throughout workflow
-✅ Stratum-wise sample count display in tabular format
-✅ Improved export performance with threading
-✅ Professional UI with ttk styles
-✅ Real-time sample size adjustment information
-
-Installation:
-    pip install pandas numpy scipy openpyxl
-
-Usage:
-    python omrc_sampling_v10_complete.py
-
-Author: Financial Audit Sampling System
-Version: 10.0 - Complete End-to-End with Tabular Display
-Date: January 2026
+OMRC Audit Sampling Tool – v10.0
+Rule-Based Stratified Sampling (Audit Ready)
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import numpy as np
-from scipy import stats
-from datetime import datetime
 import os
-import threading
-import traceback
+from datetime import datetime
 
 
-class OMRCRiskBasedSamplingTool:
-    """
-    OMRC Risk-Based Audit Sampling Tool v10.0
-    Enterprise-grade stratified sampling with complete tabular displays
-    Auto-adjusts sample size based on strata count for optimal coverage
-    """
-    
+class AuditSamplingApp:
+
     def __init__(self, root):
         self.root = root
-        self.root.title("OMRC Risk-Based Audit Sampling Tool v10.0 - Complete Edition")
-        self.root.geometry("1700x1050")
-        self.root.configure(bg="#f0f0f0")
-        
-        # ====== DATA STORAGE ======
+        self.root.title("Audit Sampling Tool – Rule Based Stratified")
+        self.root.geometry("1800x1000")
+
         self.data = None
-        self.risk_data = None
-        self.sample_data = None
-        self.strata_summary = None
-        self.missed_strata = []
-        self.sample_size = 0
-        self.cochran_base_size = 0
-        self.actual_strata_count = 0
-        self.adjusted_sample_size = 0
-        
-        # ====== COLUMN SELECTION ======
-        self.region_col = tk.StringVar()
-        self.product_col = tk.StringVar()
-        self.additional_cols_vars = {}
-        self.selected_additional_cols = []
-        
-        # ====== UI COMPONENTS ======
-        self.region_combo = None
-        self.product_combo = None
-        self.additional_cols_frame = None
-        self.additional_cols_canvas = None
-        self.preview_table = None
-        self.risk_summary_text = None
-        self.sample_table = None
-        self.strata_count_table = None
-        self.missed_strata_text = None
-        self.coverage_text = None
-        self.audit_text = None
-        
-        # ====== OUTPUT DIRECTORY ======
-        self.output_dir = os.path.expanduser("~/OMRC_Results")
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Configure styles and build UI
-        self.configure_styles()
+        self.selected_optional_cols = []
+        self.stratum_stats = None
+        self.sample_df = None
+
         self.build_ui()
-    
-    # ============================================================================
-    # STYLE CONFIGURATION
-    # ============================================================================
-    
-    def configure_styles(self):
-        """Configure professional ttk styles"""
-        style = ttk.Style()
-        style.theme_use("clam")
-        
-        style.configure("Title.TLabel", font=("Arial", 14, "bold"), foreground="#1a4d8f")
-        style.configure("Heading.TLabel", font=("Arial", 12, "bold"), foreground="#2c5aa0")
-        style.configure("SubHeading.TLabel", font=("Arial", 11, "bold"), foreground="#2c5aa0")
-        style.configure("Info.TLabel", font=("Arial", 10), foreground="#666666")
-        style.configure("Success.TLabel", font=("Arial", 10, "bold"), foreground="#2d7a3a")
-        style.configure("Warning.TLabel", font=("Arial", 10, "bold"), foreground="#c43c1d")
-        style.configure("Action.TButton", font=("Arial", 11, "bold"))
-        
-        # Treeview style for tables
-        style.configure("Treeview", font=("Courier", 9), rowheight=20)
-        style.configure("Treeview.Heading", font=("Courier", 10, "bold"))
-    
-    # ============================================================================
-    # UI CONSTRUCTION
-    # ============================================================================
-    
+
+    # ================= UI =================
+
     def build_ui(self):
-        """Build complete user interface with 4 tabs"""
-        
-        # Main frame
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # Header
-        header_frame = ttk.Frame(main_frame)
-        header_frame.pack(fill="x", padx=10, pady=10)
-        
-        header_label = ttk.Label(
-            header_frame, 
-            text="🎯 OMRC Risk-Based Audit Sampling Tool v10.0 - Complete Edition",
-            style="Title.TLabel"
-        )
-        header_label.pack(side="left")
-        
-        # Notebook (tabs)
-        notebook = ttk.Notebook(main_frame)
+        notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True)
-        
-        # Tab 1: Data & Configuration
+
         self.tab1 = ttk.Frame(notebook)
-        notebook.add(self.tab1, text="📊 Data & Configuration")
-        self.build_tab1()
-        
-        # Tab 2: Risk Analysis
         self.tab2 = ttk.Frame(notebook)
-        notebook.add(self.tab2, text="📈 Risk Analysis")
-        self.build_tab2()
-        
-        # Tab 3: Sampling & Results
         self.tab3 = ttk.Frame(notebook)
-        notebook.add(self.tab3, text="🎯 Sampling & Results")
-        self.build_tab3()
-        
-        # Tab 4: Coverage & Audit
         self.tab4 = ttk.Frame(notebook)
-        notebook.add(self.tab4, text="✓ Coverage & Audit")
+
+        notebook.add(self.tab1, text="1. Data & Columns")
+        notebook.add(self.tab2, text="2. Stratum & Risk Stats")
+        notebook.add(self.tab3, text="3. Sampling Results")
+        notebook.add(self.tab4, text="4. Documentation & Export")
+
+        self.build_tab1()
+        self.build_tab2()
+        self.build_tab3()
         self.build_tab4()
-    
+
+    # ================= TAB 1 =================
+
     def build_tab1(self):
-        """Tab 1: Data loading and column configuration with TABULAR PREVIEW"""
-        
-        # ====== SECTION: DATA LOADING ======
-        data_frame = ttk.LabelFrame(self.tab1, text="1️⃣  LOAD YOUR DATA", padding=15)
-        data_frame.pack(fill="x", padx=10, pady=10)
-        
-        file_frame = ttk.Frame(data_frame)
-        file_frame.pack(fill="x", pady=10)
-        
-        ttk.Label(file_frame, text="Select CSV or Excel File:").pack(side="left", padx=5)
-        self.file_entry = ttk.Entry(file_frame)
-        self.file_entry.pack(side="left", fill="x", expand=True, padx=5)
-        
-        btn_browse = ttk.Button(file_frame, text="📂 Browse", command=self.browse_file, style="Action.TButton")
-        btn_browse.pack(side="left", padx=5)
-        
-        button_frame = ttk.Frame(data_frame)
-        button_frame.pack(fill="x", pady=10)
-        
-        btn_load = ttk.Button(button_frame, text="Load Data", command=self.load_data, style="Action.TButton")
-        btn_load.pack(side="left", padx=5)
-        
-        # Status message
-        self.load_msg = ttk.Label(data_frame, text="Ready to load data", foreground="gray")
-        self.load_msg.pack(fill="x", pady=10)
-        
-        # ====== SECTION: COLUMN CONFIGURATION ======
-        config_frame = ttk.LabelFrame(self.tab1, text="2️⃣  CONFIGURE COLUMNS & STRATA", padding=15)
-        config_frame.pack(fill="x", padx=10, pady=10)
-        
-        # Region and Product selection
-        sel_frame = ttk.Frame(config_frame)
-        sel_frame.pack(fill="x", pady=10)
-        
-        ttk.Label(sel_frame, text="Region Column:", style="Heading.TLabel").pack(side="left", padx=5)
-        self.region_combo = ttk.Combobox(sel_frame, textvariable=self.region_col, state="readonly", width=20)
-        self.region_combo.pack(side="left", padx=5, fill="x", expand=True)
-        self.region_combo.bind("<<ComboboxSelected>>", lambda e: self.update_additional_columns_list())
-        
-        ttk.Label(sel_frame, text="Product Column:", style="Heading.TLabel").pack(side="left", padx=5)
-        self.product_combo = ttk.Combobox(sel_frame, textvariable=self.product_col, state="readonly", width=20)
-        self.product_combo.pack(side="left", padx=5, fill="x", expand=True)
-        self.product_combo.bind("<<ComboboxSelected>>", lambda e: self.update_additional_columns_list())
-        
-        # Additional columns with scrollbar
-        ttk.Label(config_frame, text="📌 Select Additional Columns (Optional - ALL WILL BE INCLUDED IN STRATA):", 
-                 style="Heading.TLabel").pack(fill="x", pady=(10, 5))
-        
-        scroll_frame = ttk.Frame(config_frame)
-        scroll_frame.pack(fill="both", expand=True, pady=10)
-        
-        self.additional_cols_canvas = tk.Canvas(scroll_frame, height=150, bg="white", highlightthickness=1)
-        self.additional_cols_canvas.pack(side="left", fill="both", expand=True)
-        
-        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=self.additional_cols_canvas.yview)
-        scrollbar.pack(side="right", fill="y")
-        
-        self.additional_cols_canvas.configure(yscrollcommand=scrollbar.set)
-        
-        self.additional_cols_frame = ttk.Frame(self.additional_cols_canvas)
-        self.additional_cols_canvas.create_window((0, 0), window=self.additional_cols_frame, anchor="nw")
-        
-        # Binding mousewheel
-        self.additional_cols_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        
-        # ====== SECTION: DATA PREVIEW (TABULAR) ======
-        preview_frame = ttk.LabelFrame(self.tab1, text="📋 DATA PREVIEW (TABULAR FORMAT)", padding=15)
-        preview_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        # Create treeview for tabular display
-        preview_label = ttk.Label(preview_frame, text="First 50 rows of loaded data:", style="Info.TLabel")
-        preview_label.pack(fill="x", pady=(0, 10))
-        
-        # Frame for treeview and scrollbars
-        tree_frame = ttk.Frame(preview_frame)
-        tree_frame.pack(fill="both", expand=True)
-        
-        # Scrollbars
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
-        vsb.pack(side="right", fill="y")
-        
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
-        hsb.pack(side="bottom", fill="x")
-        
-        # Treeview
-        self.preview_table = ttk.Treeview(tree_frame, yscrollcommand=vsb.set, xscrollcommand=hsb.set, height=12)
-        self.preview_table.pack(fill="both", expand=True)
-        
-        vsb.config(command=self.preview_table.yview)
-        hsb.config(command=self.preview_table.xview)
-    
+        frame = ttk.LabelFrame(self.tab1, text="Load Dataset", padding=10)
+        frame.pack(fill="x")
+
+        ttk.Button(frame, text="Load Data", command=self.load_data).pack(side="left")
+        self.data_label = ttk.Label(frame, text="No data loaded", foreground="blue")
+        self.data_label.pack(side="left", padx=10)
+
+        cols = ttk.LabelFrame(self.tab1, text="Column Selection", padding=10)
+        cols.pack(fill="x", pady=5)
+
+        ttk.Label(cols, text="Region Column").grid(row=0, column=0)
+        self.region_col = tk.StringVar(value="region")
+        ttk.Combobox(cols, textvariable=self.region_col, width=25).grid(row=0, column=1)
+
+        ttk.Label(cols, text="Product Column").grid(row=0, column=2, padx=10)
+        self.product_col = tk.StringVar(value="product")
+        ttk.Combobox(cols, textvariable=self.product_col, width=25).grid(row=0, column=3)
+
+        ttk.Button(cols, text="Select Optional Columns", command=self.select_optional_columns)\
+            .grid(row=0, column=4, padx=20)
+
+        preview = ttk.LabelFrame(self.tab1, text="Data Preview", padding=10)
+        preview.pack(fill="both", expand=True)
+
+        self.preview_tree = ttk.Treeview(preview)
+        self.preview_tree.pack(fill="both", expand=True)
+
+    # ================= TAB 2 =================
+
     def build_tab2(self):
-        """Tab 2: Risk calculation and stratification"""
-        
-        # ====== SECTION: RISK PARAMETERS ======
-        param_frame = ttk.LabelFrame(self.tab2, text="📊 RISK PARAMETERS & SAMPLE SIZE", padding=15)
-        param_frame.pack(fill="x", padx=10, pady=10)
-        
-        params_grid = ttk.Frame(param_frame)
-        params_grid.pack(fill="x")
-        
-        ttk.Label(params_grid, text="Confidence Level (%):", style="Heading.TLabel").pack(side="left", padx=5)
-        self.confidence_var = tk.StringVar(value="95")
-        ttk.Combobox(params_grid, textvariable=self.confidence_var, 
-                    values=["90", "95", "99"], state="readonly", width=10).pack(side="left", padx=5)
-        
-        ttk.Label(params_grid, text="Error Margin (%):", style="Heading.TLabel").pack(side="left", padx=15)
-        self.error_margin_var = tk.StringVar(value="5")
-        ttk.Combobox(params_grid, textvariable=self.error_margin_var, 
-                    values=["1", "2", "5", "10"], state="readonly", width=10).pack(side="left", padx=5)
-        
-        button_frame = ttk.Frame(param_frame)
-        button_frame.pack(fill="x", pady=15)
-        
-        btn_calc = ttk.Button(button_frame, text="🔢 Calculate Risk & Stratify", 
-                             command=self.calculate_risk, style="Action.TButton")
-        btn_calc.pack(side="left", padx=5)
-        
-        # Sample size info frame
-        info_frame = ttk.Frame(param_frame)
-        info_frame.pack(fill="x", pady=10)
-        
-        self.sample_size_info = ttk.Label(info_frame, text="Ready for calculation", style="Info.TLabel")
-        self.sample_size_info.pack(fill="x")
-        
-        # Status message
-        self.risk_msg = ttk.Label(param_frame, text="", foreground="green")
-        self.risk_msg.pack(fill="x", pady=10)
-        
-        # ====== SECTION: RISK ANALYSIS RESULTS ======
-        result_frame = ttk.LabelFrame(self.tab2, text="📈 STRATIFICATION & RISK ANALYSIS (Sorted Descending by Risk)", padding=15)
-        result_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        # Stats grid
-        stats_frame = ttk.Frame(result_frame)
-        stats_frame.pack(fill="x", pady=10)
-        
-        self.stat_total_strata = ttk.Label(stats_frame, text="Total Strata: 0", style="Info.TLabel")
-        self.stat_total_strata.pack(side="left", padx=15)
-        
-        self.stat_total_records = ttk.Label(stats_frame, text="Total Records: 0", style="Info.TLabel")
-        self.stat_total_records.pack(side="left", padx=15)
-        
-        self.stat_high_risk = ttk.Label(stats_frame, text="High Risk Strata: 0", style="Warning.TLabel")
-        self.stat_high_risk.pack(side="left", padx=15)
-        
-        self.stat_sample_size = ttk.Label(stats_frame, text="Sample Size: 0", style="Success.TLabel")
-        self.stat_sample_size.pack(side="left", padx=15)
-        
-        # Risk summary text
-        self.risk_summary_text = scrolledtext.ScrolledText(result_frame, height=15, width=100, 
-                                                          bg="white", font=("Courier", 10))
-        self.risk_summary_text.pack(fill="both", expand=True, pady=10)
-    
+        ttk.Button(self.tab2, text="Calculate Stratum & Risk Stats",
+                   command=self.calculate_stratum_stats).pack(pady=10)
+
+        self.stats_tree = ttk.Treeview(
+            self.tab2,
+            columns=("Stratum", "Population", "RiskScore", "Percent"),
+            show="headings"
+        )
+        self.stats_tree.pack(fill="both", expand=True)
+
+        for c in ["Stratum", "Population", "RiskScore", "Percent"]:
+            self.stats_tree.heading(c, text=c)
+            self.stats_tree.column(c, width=300)
+
+    # ================= TAB 3 =================
+
     def build_tab3(self):
-        """Tab 3: Sampling and results with TABULAR DISPLAY"""
-        
-        # ====== SECTION: SAMPLE GENERATION ======
-        sample_frame = ttk.LabelFrame(self.tab3, text="🎯 GENERATE STRATIFIED SAMPLE", padding=15)
-        sample_frame.pack(fill="x", padx=10, pady=10)
-        
-        button_frame = ttk.Frame(sample_frame)
-        button_frame.pack(fill="x")
-        
-        btn_generate = ttk.Button(button_frame, text="🎲 Generate Sample", command=self.generate_sample, style="Action.TButton")
-        btn_generate.pack(side="left", padx=5)
-        
-        # Status message
-        self.sample_msg = ttk.Label(sample_frame, text="Ready to generate sample", foreground="gray")
-        self.sample_msg.pack(fill="x", pady=10)
-        
-        # ====== SECTION: STRATUM COUNT (TABULAR) ======
-        count_frame = ttk.LabelFrame(self.tab3, text="📊 SAMPLE DISTRIBUTION BY STRATUM (Tabular - Sorted Descending)", padding=15)
-        count_frame.pack(fill="x", padx=10, pady=10, expand=True)
-        
-        # Stats for stratum distribution
-        count_stats = ttk.Frame(count_frame)
-        count_stats.pack(fill="x", pady=(0, 10))
-        
-        self.count_stat_label = ttk.Label(count_stats, text="", style="Info.TLabel")
-        self.count_stat_label.pack(fill="x")
-        
-        # Treeview for stratum count
-        tree_frame = ttk.Frame(count_frame)
-        tree_frame.pack(fill="both", expand=True)
-        
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
-        vsb.pack(side="right", fill="y")
-        
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
-        hsb.pack(side="bottom", fill="x")
-        
-        self.strata_count_table = ttk.Treeview(tree_frame, columns=("Stratum", "Sample_Count"), 
-                                               show="headings", height=8, yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self.strata_count_table.pack(fill="both", expand=True)
-        
-        vsb.config(command=self.strata_count_table.yview)
-        hsb.config(command=self.strata_count_table.xview)
-        
-        self.strata_count_table.heading("Stratum", text="Stratum Name")
-        self.strata_count_table.heading("Sample_Count", text="Sample Count")
-        self.strata_count_table.column("Stratum", width=600, anchor="w")
-        self.strata_count_table.column("Sample_Count", width=150, anchor="center")
-        
-        # ====== SECTION: SAMPLED DATA (TABULAR) ======
-        table_frame = ttk.LabelFrame(self.tab3, text="📋 SAMPLED RECORDS (Tabular View - All Columns)", padding=15)
-        table_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        # Stats
-        stats_frame = ttk.Frame(table_frame)
-        stats_frame.pack(fill="x", pady=10)
-        
-        self.stat_sampled = ttk.Label(stats_frame, text="Total Sampled: 0", style="Success.TLabel")
-        self.stat_sampled.pack(side="left", padx=20)
-        
-        self.stat_percentage = ttk.Label(stats_frame, text="% of Population: 0%", style="Info.TLabel")
-        self.stat_percentage.pack(side="left", padx=20)
-        
-        # Treeview for sampled data
-        tree_frame = ttk.Frame(table_frame)
-        tree_frame.pack(fill="both", expand=True)
-        
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
-        vsb.pack(side="right", fill="y")
-        
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
-        hsb.pack(side="bottom", fill="x")
-        
-        self.sample_table = ttk.Treeview(tree_frame, yscrollcommand=vsb.set, xscrollcommand=hsb.set, height=10)
-        self.sample_table.pack(fill="both", expand=True)
-        
-        vsb.config(command=self.sample_table.yview)
-        hsb.config(command=self.sample_table.xview)
-        
-        # ====== SECTION: EXPORT ======
-        export_frame = ttk.LabelFrame(self.tab3, text="💾 EXPORT RESULTS (3 FILES - FAST < 2 SEC)", padding=15)
-        export_frame.pack(fill="x", padx=10, pady=10)
-        
-        info_label = ttk.Label(export_frame, 
-                              text="Exports: 1) Stratum_Analysis.xlsx  2) Risk_Analysis.xlsx (Sorted Descending)  3) Sampled_Data.xlsx (All Columns)",
-                              style="Info.TLabel")
-        info_label.pack(fill="x", pady=5)
-        
-        button_frame = ttk.Frame(export_frame)
-        button_frame.pack(fill="x")
-        
-        btn_export = ttk.Button(button_frame, text="⚡ Export All Files (Fast)", command=self.export_files_fast, style="Action.TButton")
-        btn_export.pack(side="left", padx=5)
-        
-        # Export status
-        self.export_msg = ttk.Label(export_frame, text="Ready to export", foreground="gray")
-        self.export_msg.pack(fill="x", pady=10)
-    
+        ttk.Button(self.tab3, text="Generate Sample",
+                   command=self.generate_sample).pack(pady=10)
+
+        self.sample_tree = ttk.Treeview(
+            self.tab3,
+            columns=("Metric", "Value"),
+            show="headings"
+        )
+        self.sample_tree.pack(fill="x")
+
+        self.unsampled_tree = ttk.Treeview(
+            self.tab3,
+            columns=("Stratum", "Population"),
+            show="headings"
+        )
+        self.unsampled_tree.pack(fill="both", expand=True, pady=10)
+
+        for c in ["Metric", "Value"]:
+            self.sample_tree.heading(c, text=c)
+            self.sample_tree.column(c, width=300)
+
+        for c in ["Stratum", "Population"]:
+            self.unsampled_tree.heading(c, text=c)
+            self.unsampled_tree.column(c, width=400)
+
+    # ================= TAB 4 =================
+
     def build_tab4(self):
-        """Tab 4: Coverage and audit methodology"""
-        
-        # ====== SECTION: COVERAGE ANALYSIS ======
-        coverage_frame = ttk.LabelFrame(self.tab4, text="✓ AUDIT COVERAGE ANALYSIS - MISSED STRATA", padding=15)
-        coverage_frame.pack(fill="x", padx=10, pady=10)
-        
-        button_frame = ttk.Frame(coverage_frame)
-        button_frame.pack(fill="x")
-        
-        btn_coverage = ttk.Button(button_frame, text="🔍 Generate Coverage Report", 
-                                 command=self.show_coverage_analysis, style="Action.TButton")
-        btn_coverage.pack(side="left", padx=5)
-        
-        # Missed strata display
-        self.missed_strata_text = scrolledtext.ScrolledText(coverage_frame, height=8, width=100,
-                                                           bg="white", font=("Courier", 10))
-        self.missed_strata_text.pack(fill="both", expand=True, pady=10)
-        
-        # ====== SECTION: SAMPLING METHODOLOGY ======
-        method_frame = ttk.LabelFrame(self.tab4, text="📋 SAMPLING METHODOLOGY & AUTO-ADJUSTMENT FORMULA", padding=15)
-        method_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        self.audit_text = scrolledtext.ScrolledText(method_frame, height=20, width=100,
-                                                   bg="white", font=("Courier", 9))
-        self.audit_text.pack(fill="both", expand=True)
-        
-        # Display methodology
-        self.display_methodology()
-    
-    # ============================================================================
-    # DATA OPERATIONS
-    # ============================================================================
-    
-    def browse_file(self):
-        """Browse and select file"""
-        file_path = filedialog.askopenfilename(
-            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx"), ("All files", "*.*")]
-        )
-        if file_path:
-            self.file_entry.delete(0, tk.END)
-            self.file_entry.insert(0, file_path)
-    
+        self.doc_text = tk.Text(self.tab4, wrap="word", font=("Arial", 10))
+        self.doc_text.pack(fill="both", expand=True)
+
+        export = ttk.Frame(self.tab4)
+        export.pack(fill="x")
+
+        ttk.Button(export, text="Export Sampled Data", command=self.export_sample).pack(side="left", padx=5)
+        ttk.Button(export, text="Export Unsampled Strata", command=self.export_unsampled).pack(side="left", padx=5)
+        ttk.Button(export, text="Export Stratum Stats", command=self.export_stats).pack(side="left", padx=5)
+        ttk.Button(export, text="Export Documentation", command=self.export_doc).pack(side="left", padx=5)
+
+    # ================= CORE LOGIC =================
+
     def load_data(self):
-        """Load CSV or Excel data"""
-        file_path = self.file_entry.get()
-        if not file_path:
-            messagebox.showerror("Error", "Please select a file")
+        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx")])
+        if not path:
             return
-        
-        try:
-            if file_path.endswith('.csv'):
-                self.data = pd.read_csv(file_path)
-            elif file_path.endswith(('.xlsx', '.xls')):
-                self.data = pd.read_excel(file_path)
-            else:
-                messagebox.showerror("Error", "Unsupported file format")
-                return
-            
-            # Update column dropdowns
-            self.update_column_dropdowns()
-            
-            # Display tabular preview
-            self.display_preview_table()
-            
-            # Update status
-            self.load_msg.config(
-                text=f"✅ Loaded {len(self.data):,} records with {len(self.data.columns)} columns",
-                foreground="green"
-            )
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load file: {str(e)}")
-            self.load_msg.config(text=f"❌ Error: {str(e)}", foreground="red")
-    
-    def update_column_dropdowns(self):
-        """Update region and product column dropdowns"""
-        if self.data is None or self.data.empty:
-            return
-        
-        columns = list(self.data.columns)
-        self.region_combo['values'] = columns
-        self.product_combo['values'] = columns
-        
-        # Auto-select first two columns if available
-        if len(columns) >= 2:
-            self.region_combo.current(0)
-            self.product_combo.current(1)
-        
-        self.update_additional_columns_list()
-    
-    def update_additional_columns_list(self):
-        """Update additional columns checkboxes"""
-        if self.data is None or self.data.empty:
-            return
-        
-        region_col = self.region_col.get()
-        product_col = self.product_col.get()
-        
-        all_columns = list(self.data.columns)
-        additional = [c for c in all_columns if c != region_col and c != product_col]
-        
-        # Clear existing checkboxes
-        for widget in self.additional_cols_frame.winfo_children():
-            widget.destroy()
-        
-        self.additional_cols_vars = {}
-        
-        # Create new checkboxes
-        for col in additional:
-            var = tk.BooleanVar(value=False)
-            self.additional_cols_vars[col] = var
-            
-            checkbox_frame = ttk.Frame(self.additional_cols_frame)
-            checkbox_frame.pack(fill="x", pady=5, padx=5)
-            
-            ttk.Checkbutton(checkbox_frame, text=col, variable=var).pack(side="left")
-        
-        # Update scroll region
-        self.additional_cols_frame.update_idletasks()
-        self.additional_cols_canvas.configure(scrollregion=self.additional_cols_canvas.bbox("all"))
-    
-    def get_selected_additional_columns(self):
-        """Get list of selected additional columns"""
-        return [col for col, var in self.additional_cols_vars.items() if var.get()]
-    
-    def display_preview_table(self):
-        """Display data preview in tabular format using Treeview"""
-        if self.data is None or self.data.empty:
-            return
-        
-        # Clear existing items
-        for item in self.preview_table.get_children():
-            self.preview_table.delete(item)
-        
-        # Clear existing columns
-        if self.preview_table["columns"]:
-            for col in self.preview_table["columns"]:
-                self.preview_table.delete(col)
-        self.preview_table.configure(columns=[])
-        
-        # Get columns
-        columns = list(self.data.columns)
-        
-        # Configure columns
-        self.preview_table.configure(columns=columns)
-        self.preview_table.column("#0", width=0, stretch=tk.NO)
-        
-        for col in columns:
-            self.preview_table.column(col, anchor=tk.W, width=120)
-            self.preview_table.heading(col, text=col)
-        
-        # Add data (first 50 rows)
-        for idx, row in self.data.head(50).iterrows():
-            values = [str(row[col])[:60] for col in columns]  # Limit display width
-            self.preview_table.insert("", tk.END, values=values)
-        
-        # Add note if more than 50 rows
-        if len(self.data) > 50:
-            self.preview_table.insert("", tk.END, values=[f"... {len(self.data) - 50} more rows"])
-    
-    # ============================================================================
-    # RISK CALCULATION
-    # ============================================================================
-    
-    def calculate_risk(self):
-        """Calculate risk scores using Cochran's formula and stratify with auto-adjustment"""
-        if self.data is None or self.data.empty:
-            messagebox.showerror("Error", "Load data first")
-            return
-        
-        region_col = self.region_col.get()
-        product_col = self.product_col.get()
-        additional_cols = self.get_selected_additional_columns()
-        
-        if not region_col or not product_col:
-            messagebox.showerror("Error", "Select Region and Product columns")
-            return
-        
-        try:
-            self.risk_msg.config(text="⏳ Calculating risk and stratifying...", foreground="blue")
-            self.root.update()
-            
-            # Get parameters
-            confidence = float(self.confidence_var.get()) / 100
-            error_margin = float(self.error_margin_var.get()) / 100
-            
-            # Z-score lookup (Cochran's formula)
-            z_scores = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}
-            z = z_scores.get(confidence, 1.96)
-            
-            # Cochran's formula: n = (Z² × p × (1-p)) / e²
-            self.cochran_base_size = int(np.ceil((z**2 * 0.5 * 0.5) / (error_margin**2)))
-            
-            # ====== CREATE STRATA ======
-            strata_dict = {}
-            
-            for idx, row in self.data.iterrows():
-                stratum_parts = [str(row[region_col]), str(row[product_col])]
-                stratum_parts.extend([str(row[col]) for col in additional_cols])
-                stratum_key = " | ".join(stratum_parts)
-                
-                if stratum_key not in strata_dict:
-                    strata_dict[stratum_key] = {
-                        'region': row[region_col],
-                        'product': row[product_col],
-                        'additional': {col: row[col] for col in additional_cols},
-                        'records': []
-                    }
-                
-                strata_dict[stratum_key]['records'].append(idx)
-            
-            self.actual_strata_count = len(strata_dict)
-            
-            # ====== AUTO-ADJUST SAMPLE SIZE BASED ON STRATA COUNT ======
-            # If strata > 400, scale up to maintain 60% coverage
-            if self.actual_strata_count > 400:
-                self.adjusted_sample_size = int(np.ceil(self.actual_strata_count * 0.60))
-                self.sample_size = max(self.cochran_base_size, self.adjusted_sample_size)
-            else:
-                self.sample_size = self.cochran_base_size
-            
-            # Display sample size info
-            coverage_pct = (self.sample_size / self.actual_strata_count) * 100
-            self.sample_size_info.config(
-                text=f"📊 Cochran Base: {self.cochran_base_size} | Total Strata: {self.actual_strata_count:,} | "
-                     f"Adjusted Sample Size: {self.sample_size:,} | Expected Coverage: {coverage_pct:.1f}%",
-                foreground="#2c5aa0"
-            )
-            
-            # ====== CALCULATE RISK SCORES ======
-            risk_data = []
-            
-            for stratum_key, stratum_info in strata_dict.items():
-                population_size = len(stratum_info['records'])
-                population_pct = (population_size / len(self.data)) * 100
-                
-                # Neyman allocation: n_h = (N_h / N) × n
-                risk_score = int(np.ceil((population_size / len(self.data)) * self.sample_size))
-                
-                # Only include strata with at least 1 allocated sample
-                if risk_score > 0:
-                    risk_data.append({
-                        'stratum': stratum_key,
-                        'region': stratum_info['region'],
-                        'product': stratum_info['product'],
-                        'additional': stratum_info['additional'],
-                        'population': population_size,
-                        'percentage': population_pct,
-                        'risk_score': risk_score,
-                        'record_indices': stratum_info['records']
-                    })
-            
-            # ====== SORT BY RISK DESCENDING ======
-            risk_data.sort(key=lambda x: x['risk_score'], reverse=True)
-            
-            self.risk_data = risk_data
-            
-            # Display results
-            self.display_risk_analysis(risk_data)
-            
-            # Count sampled strata
-            sampled_strata = len([r for r in risk_data if r['risk_score'] > 0])
-            missed_strata = self.actual_strata_count - sampled_strata
-            
-            self.risk_msg.config(
-                text=f"✅ Risk Calculated | Sample Size: {self.sample_size:,} | Sampled Strata: {sampled_strata}/{self.actual_strata_count:,} | "
-                     f"Coverage: {(sampled_strata/self.actual_strata_count)*100:.1f}% | Missed: {missed_strata:,}",
-                foreground="green"
-            )
-        
-        except Exception as e:
-            messagebox.showerror("Error", f"Calculation failed: {str(e)}")
-            self.risk_msg.config(text=f"❌ Error: {str(e)}", foreground="red")
-            traceback.print_exc()
-    
-    def display_risk_analysis(self, risk_data):
-        """Display risk analysis results"""
-        self.stat_total_strata.config(text=f"Sampled Strata: {len(risk_data):,} (Total: {self.actual_strata_count:,})")
-        self.stat_total_records.config(text=f"Total Records: {len(self.data):,}")
-        
-        high_risk_count = sum(1 for r in risk_data if r['risk_score'] > self.sample_size / 2)
-        self.stat_high_risk.config(text=f"High Risk Strata: {high_risk_count}")
-        self.stat_sample_size.config(text=f"Sample Size: {self.sample_size:,}")
-        
-        # Clear and display
-        self.risk_summary_text.config(state="normal")
-        self.risk_summary_text.delete("1.0", tk.END)
-        
-        header = f"{'Stratum':<60} {'Pop':<10} {'%':<8} {'Sample':<10}\n"
-        header += "-" * 90 + "\n"
-        self.risk_summary_text.insert(tk.END, header)
-        
-        total_allocated = 0
-        for r in risk_data:
-            line = f"{r['stratum']:<60} {r['population']:<10} {r['percentage']:<8.2f} {r['risk_score']:<10}\n"
-            self.risk_summary_text.insert(tk.END, line)
-            total_allocated += r['risk_score']
-        
-        footer = "-" * 90 + f"\n{'TOTAL':<60} {'':10} {'':8} {total_allocated:<10}\n"
-        self.risk_summary_text.insert(tk.END, footer)
-        
-        self.risk_summary_text.config(state="disabled")
-    
-    # ============================================================================
-    # SAMPLING
-    # ============================================================================
-    
+
+        self.data = pd.read_excel(path) if path.endswith(".xlsx") else pd.read_csv(path)
+        self.data_label.config(text=f"Loaded {len(self.data)} records")
+
+        self.preview_tree.delete(*self.preview_tree.get_children())
+        cols = list(self.data.columns[:8])
+        self.preview_tree["columns"] = cols
+        self.preview_tree["show"] = "headings"
+
+        for c in cols:
+            self.preview_tree.heading(c, text=c)
+            self.preview_tree.column(c, width=150)
+
+        for _, r in self.data.head(25).iterrows():
+            self.preview_tree.insert("", "end", values=list(r[cols]))
+
+    def select_optional_columns(self):
+        win = tk.Toplevel(self.root)
+        win.title("Select Optional Columns")
+
+        lb = tk.Listbox(win, selectmode="multiple", width=40)
+        lb.pack()
+
+        for c in self.data.columns:
+            lb.insert("end", c)
+
+        def confirm():
+            self.selected_optional_cols = [lb.get(i) for i in lb.curselection()]
+            win.destroy()
+
+        ttk.Button(win, text="Confirm", command=confirm).pack(pady=5)
+
+    def calculate_stratum_stats(self):
+        r, p = self.region_col.get(), self.product_col.get()
+        cols = [r, p] + self.selected_optional_cols
+
+        self.data["stratum"] = self.data[cols].astype(str).agg("|".join, axis=1)
+
+        stats = self.data.groupby("stratum").size().reset_index(name="population")
+        total = len(self.data)
+        stats["risk_score"] = stats["population"] / total
+        stats["percent"] = stats["risk_score"] * 100
+
+        self.stratum_stats = stats
+
+        self.stats_tree.delete(*self.stats_tree.get_children())
+        for _, s in stats.iterrows():
+            self.stats_tree.insert("", "end",
+                                   values=(s["stratum"], s["population"],
+                                           f"{s['risk_score']:.4f}",
+                                           f"{s['percent']:.2f}%"))
+
     def generate_sample(self):
-        """Generate stratified sample"""
-        if not self.risk_data:
-            messagebox.showerror("Error", "Calculate risk first")
-            return
-        
-        try:
-            self.sample_msg.config(text="⏳ Generating stratified sample...", foreground="blue")
-            self.root.update()
-            
-            # ====== STRATIFIED SAMPLING ======
-            sample_indices = []
-            stratum_sample_count = {}
-            
-            for stratum in self.risk_data:
-                stratum_key = stratum['stratum']
-                sample_count = stratum['risk_score']
-                
-                # Only process strata with allocated samples
-                if sample_count > 0:
-                    stratum_sample_count[stratum_key] = sample_count
-                    
-                    # Get all indices for this stratum
-                    stratum_indices = stratum['record_indices']
-                    
-                    # Random sampling without replacement
-                    if len(stratum_indices) <= sample_count:
-                        selected = stratum_indices
-                    else:
-                        selected = list(np.random.choice(stratum_indices, size=sample_count, replace=False))
-                    
-                    sample_indices.extend(selected)
-            
-            # Get sample data
-            self.sample_data = self.data.loc[sample_indices].reset_index(drop=True)
-            
-            # Display stratum count (tabular)
-            self.display_stratum_count_table(stratum_sample_count)
-            
-            # Display sampled data (tabular)
-            self.display_sampled_data_table()
-            
-            self.sample_msg.config(
-                text=f"✅ Generated {len(self.sample_data):,} records ({len(self.sample_data)/len(self.data)*100:.2f}% of population) | "
-                     f"From {len(stratum_sample_count):,} strata",
-                foreground="green"
-            )
-        
-        except Exception as e:
-            messagebox.showerror("Error", f"Sampling failed: {str(e)}")
-            self.sample_msg.config(text=f"❌ Error: {str(e)}", foreground="red")
-            traceback.print_exc()
-    
-    def display_stratum_count_table(self, stratum_count):
-        """Display sample count by stratum in TABULAR format - SORTED BY COUNT DESCENDING"""
-        # Clear existing items
-        for item in self.strata_count_table.get_children():
-            self.strata_count_table.delete(item)
-        
-        total_samples = 0
-        # Sort by count descending
-        sorted_strata = sorted(stratum_count.items(), key=lambda x: x[1], reverse=True)
-        
-        for stratum, count in sorted_strata:
-            self.strata_count_table.insert("", tk.END, values=(stratum, count))
-            total_samples += count
-        
-        # Add total row
-        self.strata_count_table.insert("", tk.END, values=("=" * 60 + " TOTAL SAMPLES", total_samples), tags=("total",))
-        
-        # Style total row
-        self.strata_count_table.tag_configure("total", background="#e8f5e9", foreground="#2d7a3a")
-        
-        # Update stats
-        self.count_stat_label.config(
-            text=f"Total Strata with Samples: {len(stratum_count):,} | Total Sample Count: {total_samples:,}"
-        )
-    
-    def display_sampled_data_table(self):
-        """Display sampled records in TABULAR format with ALL columns"""
-        # Clear existing items and columns
-        for item in self.sample_table.get_children():
-            self.sample_table.delete(item)
-        
-        if self.sample_table["columns"]:
-            for col in self.sample_table["columns"]:
-                self.sample_table.delete(col)
-        self.sample_table.configure(columns=[])
-        
-        # Get columns
-        columns = list(self.sample_data.columns)
-        
-        # Configure columns
-        self.sample_table.configure(columns=columns)
-        self.sample_table.column("#0", width=0, stretch=tk.NO)
-        
-        for col in columns:
-            self.sample_table.column(col, anchor=tk.W, width=100)
-            self.sample_table.heading(col, text=col)
-        
-        # Add data (limit display to first 100)
-        display_count = 0
-        for idx, row in self.sample_data.iterrows():
-            if display_count >= 100:
-                self.sample_table.insert("", tk.END, values=(f"... and {len(self.sample_data) - 100} more records",))
-                break
-            values = [str(row[col])[:50] for col in columns]
-            self.sample_table.insert("", tk.END, values=values)
-            display_count += 1
-        
-        # Stats
-        self.stat_sampled.config(text=f"Total Sampled: {len(self.sample_data):,}")
-        self.stat_percentage.config(text=f"% of Population: {len(self.sample_data)/len(self.data)*100:.2f}%")
-    
-    # ============================================================================
-    # EXPORT (FAST - MULTI-THREADED)
-    # ============================================================================
-    
-    def export_files_fast(self):
-        """Export 3 files simultaneously (fast threading approach)"""
-        if self.sample_data is None or self.risk_data is None:
-            messagebox.showerror("Error", "Generate sample first")
-            return
-        
-        self.export_msg.config(text="⏳ Exporting 3 files...", foreground="blue")
-        self.root.update()
-        
-        # Run export in background thread
-        thread = threading.Thread(target=self._export_worker)
-        thread.daemon = True
-        thread.start()
-    
-    def _export_worker(self):
-        """Export worker thread"""
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # ====== FILE 1: STRATUM ANALYSIS ======
-            stratum_data = []
-            for stratum_info in self.risk_data:
-                stratum_data.append({
-                    'Stratum': stratum_info['stratum'],
-                    'Region': stratum_info['region'],
-                    'Product': stratum_info['product'],
-                    'Population': stratum_info['population'],
-                    'Percentage': f"{stratum_info['percentage']:.4f}%",
-                    'Sample_Allocation': stratum_info['risk_score'],
-                    'Allocation_Method': 'Neyman (Proportional)',
-                    'Allocation_Formula': f"({stratum_info['population']}/{len(self.data)}) × {self.sample_size}"
-                })
-            
-            stratum_df = pd.DataFrame(stratum_data)
-            stratum_file = os.path.join(self.output_dir, f"01_Stratum_Analysis_{timestamp}.xlsx")
-            stratum_df.to_excel(stratum_file, index=False, sheet_name="Strata")
-            
-            # ====== FILE 2: RISK ANALYSIS (SORTED DESCENDING) ======
-            risk_analysis_data = []
-            for idx, stratum_info in enumerate(self.risk_data, 1):
-                risk_analysis_data.append({
-                    'Rank': idx,
-                    'Stratum': stratum_info['stratum'],
-                    'Population': stratum_info['population'],
-                    'Sample_Allocation': stratum_info['risk_score'],
-                    'Allocation_Percentage': f"{(stratum_info['risk_score']/self.sample_size)*100:.2f}%",
-                    'Formula': f"Neyman: n_h = (N_h/N) × n"
-                })
-            
-            risk_df = pd.DataFrame(risk_analysis_data)
-            risk_file = os.path.join(self.output_dir, f"02_Risk_Analysis_DESCENDING_{timestamp}.xlsx")
-            risk_df.to_excel(risk_file, index=False, sheet_name="Risk Analysis")
-            
-            # ====== FILE 3: SAMPLED DATA (WITH ALL COLUMNS) ======
-            sampled_file = os.path.join(self.output_dir, f"03_Sampled_Data_{timestamp}.xlsx")
-            self.sample_data.to_excel(sampled_file, index=False, sheet_name="Sampled Records")
-            
-            # Create metadata sheet
-            metadata = []
-            metadata.append({'Metric': 'Export Timestamp', 'Value': timestamp})
-            metadata.append({'Metric': 'Total Population', 'Value': len(self.data)})
-            metadata.append({'Metric': 'Total Strata (All)', 'Value': self.actual_strata_count})
-            metadata.append({'Metric': 'Sampled Strata', 'Value': len(self.risk_data)})
-            metadata.append({'Metric': 'Cochran Base Sample Size', 'Value': self.cochran_base_size})
-            metadata.append({'Metric': 'Adjusted Sample Size', 'Value': self.sample_size})
-            metadata.append({'Metric': 'Expected Coverage %', 'Value': f"{(self.sample_size/self.actual_strata_count)*100:.2f}%"})
-            metadata.append({'Metric': 'Actual Sampled Records', 'Value': len(self.sample_data)})
-            metadata.append({'Metric': 'Sampling %', 'Value': f"{(len(self.sample_data)/len(self.data))*100:.2f}%"})
-            
-            metadata_df = pd.DataFrame(metadata)
-            metadata_file = os.path.join(self.output_dir, f"00_Export_Metadata_{timestamp}.xlsx")
-            metadata_df.to_excel(metadata_file, index=False, sheet_name="Metadata")
-            
-            # Update UI from main thread
-            self.root.after(0, lambda: self._export_complete(stratum_file, risk_file, sampled_file, metadata_file))
-        
-        except Exception as e:
-            self.root.after(0, lambda: self._export_error(str(e)))
-            traceback.print_exc()
-    
-    def _export_complete(self, stratum_file, risk_file, sampled_file, metadata_file):
-        """Export complete callback"""
-        msg = f"""✅ EXPORT COMPLETE (< 2 seconds)
+        min_n, max_n = 300, 350
+        total = len(self.data)
+        target_n = min(max_n, max(min_n, int(total * 0.10)))
 
-Files created:
-1. {os.path.basename(metadata_file)} - Summary statistics
-2. {os.path.basename(stratum_file)} - Stratum analysis with formulas
-3. {os.path.basename(risk_file)} - Risk analysis (SORTED DESCENDING)
-4. {os.path.basename(sampled_file)} - Sampled records (all columns)
+        samples = []
+        for s, g in self.data.groupby("stratum"):
+            samples.append(g.sample(1))
 
-Location: {self.output_dir}
+        base = pd.concat(samples)
+        remaining = target_n - len(base)
 
-All files ready for audit team review!"""
-        
-        self.export_msg.config(text=msg, foreground="green")
-        messagebox.showinfo("✅ Export Success", msg)
-    
-    def _export_error(self, error):
-        """Export error callback"""
-        self.export_msg.config(text=f"❌ Export failed: {error}", foreground="red")
-        messagebox.showerror("Export Error", f"Failed to export: {error}")
-    
-    # ============================================================================
-    # COVERAGE & AUDIT
-    # ============================================================================
-    
-    def show_coverage_analysis(self):
-        """Display coverage analysis"""
-        if not self.risk_data or self.sample_data is None:
-            messagebox.showerror("Error", "Generate sample first")
-            return
-        
-        region_col = self.region_col.get()
-        product_col = self.product_col.get()
-        additional_cols = self.get_selected_additional_columns()
-        
-        # All strata
-        all_strata = set()
-        for _, row in self.data.iterrows():
-            parts = [str(row[region_col]), str(row[product_col])]
-            parts.extend([str(row[col]) for col in additional_cols])
-            all_strata.add(" | ".join(parts))
-        
-        # Sampled strata
-        sampled_strata = set()
-        for _, row in self.sample_data.iterrows():
-            parts = [str(row[region_col]), str(row[product_col])]
-            parts.extend([str(row[col]) for col in additional_cols])
-            sampled_strata.add(" | ".join(parts))
-        
-        # Missed strata
-        missed = all_strata - sampled_strata
-        
-        self.missed_strata_text.config(state="normal")
-        self.missed_strata_text.delete("1.0", tk.END)
-        
-        coverage_pct = (len(sampled_strata) / len(all_strata)) * 100
-        
-        header = f"COVERAGE ANALYSIS\n{'='*100}\n"
-        header += f"Total Strata: {len(all_strata):,} | Sampled Strata: {len(sampled_strata):,} | Coverage: {coverage_pct:.2f}%\n"
-        header += f"Missed Strata: {len(missed):,}\n{'='*100}\n\n"
-        
-        self.missed_strata_text.insert(tk.END, header)
-        
-        if missed:
-            self.missed_strata_text.insert(tk.END, f"⚠️  {len(missed):,} MISSED STRATA (Not Sampled):\n\n")
-            for i, stratum in enumerate(sorted(missed), 1):
-                self.missed_strata_text.insert(tk.END, f"{i:,}. {stratum}\n")
-        else:
-            self.missed_strata_text.insert(tk.END, f"✅ ALL {len(all_strata):,} STRATA COVERED IN SAMPLE\nCoverage: 100%")
-        
-        self.missed_strata_text.config(state="disabled")
-    
-    def display_methodology(self):
-        """Display sampling methodology and formulas"""
-        methodology = """
-═══════════════════════════════════════════════════════════════════════════════════════
-                    OMRC RISK-BASED AUDIT SAMPLING TOOL v10.0
-                         AUTO-ADJUSTED SAMPLE SIZE METHODOLOGY
-═══════════════════════════════════════════════════════════════════════════════════════
+        pool = self.data.drop(base.index)
+        extra = pool.sample(n=min(remaining, len(pool)),
+                            weights=pool["stratum"].map(
+                                self.stratum_stats.set_index("stratum")["risk_score"]))
 
-⭐ KEY INNOVATION IN v10.0: AUTOMATIC SAMPLE SIZE ADJUSTMENT ⭐
+        self.sample_df = pd.concat([base, extra])
 
-Problem (v9.5):
-  When adding dimensions (strata increase exponentially), coverage dropped:
-    • 586 strata → 66% coverage
-    • 3,000 strata → 13% coverage ❌
-    • 9,000 strata → 4% coverage ❌❌
+        self.sample_tree.delete(*self.sample_tree.get_children())
+        self.sample_tree.insert("", "end", values=("Total Population", total))
+        self.sample_tree.insert("", "end", values=("Total Strata", self.data["stratum"].nunique()))
+        self.sample_tree.insert("", "end", values=("Final Sample Size", len(self.sample_df)))
 
-Solution (v10.0):
-  Dynamic sample size adjustment based on total strata count:
-    
-    IF strata ≤ 400:
-      Use Cochran's formula directly (statistically optimal)
-    
-    IF strata > 400:
-      Adjusted_Size = Total_Strata × 0.60 (60% coverage target)
-      Final_Size = MAX(Cochran_Base, Adjusted_Size)
-    
-  Results:
-    • 586 strata → 385 sample (66% coverage) ✅
-    • 3,000 strata → 1,800 sample (60% coverage) ✅
-    • 9,000 strata → 5,400 sample (60% coverage) ✅
+        self.unsampled_tree.delete(*self.unsampled_tree.get_children())
+        missed = set(self.data["stratum"]) - set(self.sample_df["stratum"])
+        for m in missed:
+            pop = len(self.data[self.data["stratum"] == m])
+            self.unsampled_tree.insert("", "end", values=(m, pop))
 
-═══════════════════════════════════════════════════════════════════════════════════════
+        self.generate_documentation(target_n)
 
+    # ================= EXPORTS =================
 
-1️⃣  STEP 1: COCHRAN'S BASE SAMPLE SIZE CALCULATION
-─────────────────────────────────────────────────────
-Formula:  n = (Z² × p × (1-p)) / e²
+    def export_sample(self):
+        self.sample_df.to_csv("sampled_data.csv", index=False)
 
-Where:
-  Z = Critical value from standard normal distribution
-    • 90% confidence: Z = 1.645
-    • 95% confidence: Z = 1.96
-    • 99% confidence: Z = 2.576
-  
-  p = Estimated population proportion = 0.5 (most conservative)
-  e = Acceptable error margin (as decimal, e.g., 5% = 0.05)
-  n = Required sample size
+    def export_unsampled(self):
+        missed = set(self.data["stratum"]) - set(self.sample_df["stratum"])
+        self.data[self.data["stratum"].isin(missed)].to_csv("unsampled_strata.csv", index=False)
 
-Example Calculation (95% confidence, 5% error margin):
-  n = (1.96² × 0.5 × 0.5) / (0.05²)
-  n = (3.8416 × 0.25) / 0.0025
-  n = 0.9604 / 0.0025
-  n = 384.16 → 385 (rounded up)
+    def export_stats(self):
+        self.stratum_stats.to_csv("stratum_statistics.csv", index=False)
 
-═══════════════════════════════════════════════════════════════════════════════════════
+    def export_doc(self):
+        with open("sampling_documentation.txt", "w") as f:
+            f.write(self.doc_text.get("1.0", tk.END))
 
+    def generate_documentation(self, target_n):
+        self.doc_text.delete("1.0", tk.END)
+        self.doc_text.insert(tk.END, f"""
+AUDIT SAMPLING DOCUMENTATION
 
-2️⃣  STEP 2: COUNT TOTAL STRATA CREATED
-────────────────────────────────────────
-Formula:  Total_Strata = U₁ × U₂ × U₃ × ... × Uₙ
+1. STRATUM DEFINITION
+Strata were created using:
+Region + Product + Optional user-selected attributes.
 
-Where:
-  U₁ = Unique values in Region column
-  U₂ = Unique values in Product column
-  U₃ = Unique values in Additional Column 1
-  Uₙ = Unique values in Additional Column N
+2. SAMPLE SIZE DETERMINATION
+Lower Limit: 300
+Upper Limit: 350
+Final sample size selected: {len(self.sample_df)}
 
-Example with Your Data:
-  Region unique values: ~10
-  Product unique values: ~15
-  Additional Dim 1: ~4
-  Additional Dim 2: ~3
-  
-  Total = 10 × 15 × 4 × 3 = 1,800 strata (hypothetical)
+3. STRATUM COVERAGE RULE
+At least ONE record was selected from each stratum.
 
-═══════════════════════════════════════════════════════════════════════════════════════
+4. REMAINING SAMPLE SELECTION
+Remaining samples were selected using risk-weighted probability
+based on stratum population proportion.
 
-
-3️⃣  STEP 3: AUTO-ADJUST SAMPLE SIZE (v10.0 FEATURE)
-──────────────────────────────────────────────────────
-Check strata count:
-
-IF Total_Strata ≤ 400:
-  Adjusted_Size = Cochran_Base (use directly, natural good coverage)
-  
-IF Total_Strata > 400:
-  Adjusted_Size = CEIL(Total_Strata × 0.60)  ← Maintains 60% coverage
-  
-Final Sample Size = MAX(Cochran_Base, Adjusted_Size)
-
-Decision Logic:
-  1. Calculate Cochran's base (statistically optimal for no strata constraint)
-  2. If strata are few (≤400), stick with Cochran's
-  3. If strata are many (>400), scale up to maintain audit coverage
-  4. Use whichever is larger (conservative approach)
-
-Example Scenarios:
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │ Scenario A: 586 Strata                                              │
-  │ Cochran Base: 385                                                   │
-  │ Is 586 > 400? YES                                                   │
-  │ Adjusted: CEIL(586 × 0.60) = 352                                    │
-  │ Final: MAX(385, 352) = 385 ✓                                        │
-  │ Coverage: 385/586 = 65.7%                                           │
-  └─────────────────────────────────────────────────────────────────────┘
-  
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │ Scenario B: 3,000 Strata (added dimensions)                         │
-  │ Cochran Base: 385 (unchanged)                                       │
-  │ Is 3,000 > 400? YES                                                 │
-  │ Adjusted: CEIL(3,000 × 0.60) = 1,800                                │
-  │ Final: MAX(385, 1,800) = 1,800 ✓✓                                   │
-  │ Coverage: 1,800/3,000 = 60%  AUTO-MAINTAINED!                       │
-  │ Status: Audit valid despite many dimensions                         │
-  └─────────────────────────────────────────────────────────────────────┘
-  
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │ Scenario C: 9,000 Strata (very many dimensions)                     │
-  │ Cochran Base: 385 (unchanged)                                       │
-  │ Is 9,000 > 400? YES                                                 │
-  │ Adjusted: CEIL(9,000 × 0.60) = 5,400                                │
-  │ Final: MAX(385, 5,400) = 5,400 ✓✓✓                                  │
-  │ Coverage: 5,400/9,000 = 60%  AUTO-MAINTAINED!                       │
-  │ Note: Team needs 5,400 records but audit is statistically sound     │
-  └─────────────────────────────────────────────────────────────────────┘
-
-═══════════════════════════════════════════════════════════════════════════════════════
-
-
-4️⃣  STEP 4: STRATIFICATION (Define Strata)
-───────────────────────────────────────────
-Strata are formed as combinations of:
-  ✓ Region Column (user selected)
-  ✓ Product Column (user selected)
-  ✓ Additional Columns (user selected - ALL INCLUDED)
-
-Example Stratum Key:
-  "North | Product_A | Sales | Active"
-  
-Stratum contains: All records matching this combination
-
-═════════════════════════════════════════════════════════════════════════════════════════
-
-
-5️⃣  STEP 5: NEYMAN ALLOCATION (Assign samples per stratum)
-───────────────────────────────────────────────────────────
-Formula:  n_h = CEIL((N_h / N) × n)
-
-Where:
-  n_h = Sample size for stratum h
-  N_h = Population size of stratum h
-  N = Total population size (225,685 in your case)
-  n = Adjusted sample size (from Step 3)
-
-Interpretation:
-  Larger strata get more samples (proportional allocation)
-  Small strata get fewer samples (may get 0 if < 1.0)
-  Only strata with n_h ≥ 1 are included in final sampling
-
-Example with Adjusted Sample = 1,800, Population = 225,685:
-
-  Stratum 1: N_h = 50,000 records
-  n_h = CEIL((50,000 / 225,685) × 1,800) = CEIL(398) = 398 samples
-  Status: ✓ Sampled
-  
-  Stratum 2: N_h = 1,000 records
-  n_h = CEIL((1,000 / 225,685) × 1,800) = CEIL(8) = 8 samples
-  Status: ✓ Sampled
-  
-  Stratum 3: N_h = 50 records (very small)
-  n_h = CEIL((50 / 225,685) × 1,800) = CEIL(0.4) = 1 sample
-  Status: ✓ Sampled (minimum 1)
-  
-  Stratum 4: N_h = 10 records (extremely small)
-  n_h = CEIL((10 / 225,685) × 1,800) = CEIL(0.08) = 1 sample
-  Status: ✓ Sampled (minimum 1, but floor at 0 in v10)
-  
-  Strata with n_h < 1 → Not sampled (mathematically justified)
-
-═════════════════════════════════════════════════════════════════════════════════════════
-
-
-6️⃣  STEP 6: RANDOM SAMPLING FROM EACH STRATUM
-────────────────────────────────────────────────
-Process:
-  For each stratum with n_h ≥ 1:
-    1. Get all record indices in that stratum
-    2. Randomly select n_h records without replacement
-    3. Add to final sample
-  
-Result:
-  ✓ Stratified sample with specified sizes per stratum
-  ✓ Each stratum represented (no empty strata in sample)
-  ✓ Random selection ensures statistical validity
-  ✓ Total sample size = Sum of all n_h ≈ Adjusted_Size
-
-═════════════════════════════════════════════════════════════════════════════════════════
-
-
-7️⃣  STEP 7: TABULAR DISPLAYS (v10.0 FEATURE)
-──────────────────────────────────────────────
-Tab 1 - Data Preview:
-  ✓ First 50 rows in tabular format
-  ✓ All columns visible with scrolling
-  ✓ Professional table layout
-
-Tab 3 - Stratum Distribution:
-  ✓ Strata sorted by sample count (descending)
-  ✓ Total sample count per stratum
-  ✓ Easy verification of allocation
-
-Tab 3 - Sampled Records:
-  ✓ All records in stratified sample
-  ✓ All original columns preserved
-  ✓ First 100 rows displayed, remaining count shown
-
-═════════════════════════════════════════════════════════════════════════════════════════
-
-
-8️⃣  STEP 8: FAST EXPORT (< 2 SECONDS)
-──────────────────────────────────────
-Files Created:
-  1. Metadata file: Summary statistics and parameters
-  2. Stratum Analysis: All strata with formulas used
-  3. Risk Analysis: Strata sorted DESCENDING by risk
-  4. Sampled Data: All sampled records with original columns
-
-Each file includes:
-  ✓ Complete data for audit team
-  ✓ Calculation formulas documented
-  ✓ Timestamps for reproducibility
-  ✓ Metadata for audit trail
-
-═════════════════════════════════════════════════════════════════════════════════════════
-
-
-AUDIT REQUIREMENTS MET:
-✅ Statistical validity (Cochran formula basis)
-✅ Auto-adjusted sample size (handles any dimension count)
-✅ Proportional allocation (Neyman allocation)
-✅ Comprehensive documentation (all formulas, metadata)
-✅ Multi-dimensional stratification (all columns included)
-✅ Missed stratum detection (Tab 4 coverage analysis)
-✅ Tabular displays (easy verification)
-✅ Fast exports (4 files < 2 seconds)
-✅ Stratum-wise sample count (exact allocation per stratum)
-✅ Complete audit trail (timestamps, formulas, metadata)
-
-═════════════════════════════════════════════════════════════════════════════════════════
-
-Generated: OMRC v10.0
-Status: Production Ready
-Quality: Professional Enterprise Grade
-Date: January 2026
-
-Key Formulas Summary:
-  • Cochran: n = (Z² × p(1-p)) / e²
-  • Auto-Adjust: IF strata > 400 THEN n = MAX(Cochran, strata × 0.60)
-  • Neyman: n_h = CEIL((N_h / N) × n)
-  • Coverage: strata_sampled / total_strata × 100
-
-═════════════════════════════════════════════════════════════════════════════════════════
-"""
-        
-        self.audit_text.config(state="normal")
-        self.audit_text.delete("1.0", tk.END)
-        self.audit_text.insert("1.0", methodology)
-        self.audit_text.config(state="disabled")
-    
-    # ============================================================================
-    # UTILITY METHODS
-    # ============================================================================
-    
-    def _on_mousewheel(self, event):
-        """Handle mousewheel scrolling"""
-        self.additional_cols_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+5. AUDIT ALIGNMENT
+This approach aligns with ISA 530 and internal audit standards.
+""")
 
 
 def main():
-    """Application entry point"""
     root = tk.Tk()
-    app = OMRCRiskBasedSamplingTool(root)
+    AuditSamplingApp(root)
     root.mainloop()
 
 
