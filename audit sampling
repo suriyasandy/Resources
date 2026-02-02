@@ -24,17 +24,55 @@ def build_strata(df, cols):
 def target_sample_size(strata_count):
     return min(MAX_SAMPLE, max(MIN_SAMPLE, strata_count))
 
-def neyman_allocation(stats, total_records, target_n):
-    stats["risk_weight"] = stats["records"] / total_records
-    stats["sample_alloc"] = (stats["risk_weight"] * target_n).round().astype(int)
+def neyman_allocation_strict(stats, total_records, target_n):
+    """
+    STRICT allocation:
+    - If strata <= target_n → every stratum gets at least 1
+    - Remaining samples distributed proportionally by risk
+    - NO stratum can ever drop below 1
+    """
 
-    # Ensure at least 1 per stratum
+    strata_count = len(stats)
+
+    # Risk weight
+    stats["risk_weight"] = stats["records"] / total_records
+
+    # ---------- CASE 1: FULL STRATA COVERAGE ----------
+    if strata_count <= target_n:
+        # Step 1: baseline = 1 per stratum
+        stats["sample_alloc"] = 1
+
+        remaining = target_n - strata_count
+        if remaining > 0:
+            # Step 2: proportional top-up
+            stats["extra"] = (stats["risk_weight"] * remaining).round().astype(int)
+
+            # Fix rounding drift
+            drift = remaining - stats["extra"].sum()
+            if drift > 0:
+                stats.loc[
+                    stats.sort_values("records", ascending=False).head(drift).index,
+                    "extra"
+                ] += 1
+
+            stats["sample_alloc"] += stats["extra"]
+            stats.drop(columns=["extra"], inplace=True)
+
+        return stats
+
+    # ---------- CASE 2: PARTIAL COVERAGE ----------
+    stats["sample_alloc"] = (stats["risk_weight"] * target_n).round().astype(int)
     stats.loc[stats["sample_alloc"] < 1, "sample_alloc"] = 1
 
-    # Adjust to exact target
+    # Adjust only if we exceeded target
     diff = stats["sample_alloc"].sum() - target_n
     if diff > 0:
-        stats.loc[stats.sort_values("records").head(diff).index, "sample_alloc"] -= 1
+        reducible = stats[stats["sample_alloc"] > 1].sort_toggle("records")
+        for idx in reducible.index:
+            if diff == 0:
+                break
+            stats.at[idx, "sample_alloc"] -= 1
+            diff -= 1
 
     return stats
 
