@@ -60,4 +60,63 @@ ttk.Button(self.tab_export,
 
 def export_spread(self):
     if self.spread_coverage is not None:
-        self.spread_coverage.to_excel(f"{EXPORT_DIR}/internal_spread_coverage.xlsx", index=False)
+        self.spread_coverage.to_excel(f"{EXPORT_DIR}/internal_spread_coverage.xlsx",
+index=False)
+
+
+#insidebuil data tab
+ttk.Label(top, text="Allocation Mode").pack(side="left", padx=5)
+
+self.alloc_mode = ttk.Combobox(
+    top,
+    width=22,
+    state="readonly",
+    values=["Balanced (QA)", "Proportional (Statistical)"]
+)
+self.alloc_mode.pack(side="left")
+self.alloc_mode.set("Balanced (QA)")
+
+#rrplace allocate sample 
+def allocate_samples(stats, total_records, mode):
+    """
+    mode:
+        'Balanced (QA)'              → √N allocation
+        'Proportional (Statistical)' → N allocation
+    """
+
+    target = min(MAX_SAMPLE, max(MIN_SAMPLE, int(total_records * 0.10)))
+    stats = stats.copy()
+
+    # --- Mandatory 1 per stratum ---
+    stats["base"] = 1
+    remaining = target - len(stats)
+
+    if remaining <= 0:
+        stats["final_alloc"] = 1
+        return stats, target
+
+    if mode == "Balanced (QA)":
+        # √N allocation
+        weights = np.sqrt(stats["population"])
+
+    else:
+        # Original proportional allocation
+        weights = stats["population"]
+
+    weights = weights / weights.sum()
+    stats["extra"] = np.floor(weights * remaining).astype(int)
+
+    drift = remaining - stats["extra"].sum()
+    if drift > 0:
+        stats.iloc[:drift, stats.columns.get_loc("extra")] += 1
+
+    stats["final_alloc"] = stats["base"] + stats["extra"]
+
+    return stats, target
+
+#run samplknv chanhe the line 
+mode = self.alloc_mode.get()
+self.alloc, target = allocate_samples(self.stats, len(df), mode)
+
+#disllah populatikn overview 
+txt += f"\nALLOCATION MODE: {self.alloc_mode.get()}\n"
