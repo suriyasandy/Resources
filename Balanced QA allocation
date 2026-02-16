@@ -1,69 +1,273 @@
-def allocate_samples_balanced(df, full_stats, max_sample):
-    """
-    Industry-style balanced stratified allocation.
-    Uses square-root allocation to avoid dominance bias.
-    """
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import pandas as pd
+import numpy as np
+import os
+from datetime import datetime
 
-    total_strata = len(full_stats)
+# =====================================================
+# CONFIGURATION
+# =====================================================
+MAX_SAMPLE = 350
+MIN_SAMPLE = 300
+EXPORT_DIR = "Sampling_Outputs"
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
-    # --- Step 1: Guarantee 1 sample per stratum
-    full_stats = full_stats.copy()
-    full_stats["base_alloc"] = 1
+# =====================================================
+# CORE SAMPLING FUNCTIONS
+# =====================================================
 
-    base_used = total_strata
+def build_stratum(df, cols):
+    df["_STRATUM_"] = df[cols].astype(str).agg(" | ".join, axis=1)
+    return df
 
-    if base_used >= max_sample:
-        # rare case: more strata than allowed sample
-        full_stats["final_alloc"] = 1
-        return full_stats
+def stratum_statistics(df):
+    stats = df.groupby("_STRATUM_").size().reset_index(name="population")
+    stats["sqrt_weight"] = np.sqrt(stats["population"])
+    return stats.sort_values("population", ascending=False)
 
-    # --- Step 2: Remaining sample to distribute
-    remaining = max_sample - base_used
+def balanced_allocation(df, stats):
+    total = len(df)
+    target = min(MAX_SAMPLE, max(MIN_SAMPLE, int(total * 0.10)))
 
-    # --- Step 3: Square-root weights (industry balanced method)
-    full_stats["sqrt_weight"] = np.sqrt(full_stats["records"])
-    total_weight = full_stats["sqrt_weight"].sum()
+    stats = stats.copy()
+    stats["base"] = 1   # mandatory coverage
+    base_used = len(stats)
 
-    full_stats["raw_extra"] = (full_stats["sqrt_weight"] / total_weight) * remaining
+    if base_used >= target:
+        stats["final_alloc"] = 1
+        return stats, target
 
-    # --- Step 4: Largest Remainder Allocation (deterministic)
-    full_stats["extra_alloc"] = np.floor(full_stats["raw_extra"]).astype(int)
+    remaining = target - base_used
 
-    drift = remaining - full_stats["extra_alloc"].sum()
+    total_weight = stats["sqrt_weight"].sum()
+    stats["raw_extra"] = (stats["sqrt_weight"] / total_weight) * remaining
+    stats["extra"] = np.floor(stats["raw_extra"]).astype(int)
 
+    drift = remaining - stats["extra"].sum()
     if drift > 0:
-        remainders = full_stats["raw_extra"] - full_stats["extra_alloc"]
-        full_stats.loc[remainders.nlargest(drift).index, "extra_alloc"] += 1
+        remainder = stats["raw_extra"] - stats["extra"]
+        stats.loc[remainder.nlargest(drift).index, "extra"] += 1
 
-    full_stats["final_alloc"] = full_stats["base_alloc"] + full_stats["extra_alloc"]
+    stats["final_alloc"] = stats["base"] + stats["extra"]
 
-    return full_stats
+    return stats, target
 
+def draw_sample(df, allocation):
+    idx = []
 
-def perform_sampling_balanced(df, allocation_table):
-    """
-    Draw samples exactly per allocated counts.
-    No proportional dominance allowed.
-    """
-
-    sampled_idx = []
-
-    for _, row in allocation_table.iterrows():
-        stratum = row["_FULL_STRATUM_"]
-        take = int(row["final_alloc"])
-
-        pool = df[df["_FULL_STRATUM_"] == stratum]
-
-        take = min(take, len(pool))
-
+    for _, row in allocation.iterrows():
+        pool = df[df["_STRATUM_"] == row["_STRATUM_"]]
+        take = min(int(row["final_alloc"]), len(pool))
         chosen = pool.sample(take, random_state=42)
-        sampled_idx.extend(chosen.index.tolist())
+        idx.extend(chosen.index.tolist())
 
-    sampled = df.loc[sampled_idx]
+    sampled = df.loc[idx]
 
-    unsampled_strata = sorted(
-        set(df["_FULL_STRATUM_"].unique()) -
-        set(sampled["_FULL_STRATUM_"].unique())
+    unsampled = sorted(
+        set(df["_STRATUM_"].unique()) -
+        set(sampled["_STRATUM_"].unique())
     )
 
-    return sampled, unsampled_strata
+    return sampled, unsampled
+
+# =====================================================
+# TKINTER APPLICATION
+# =====================================================
+
+class SamplingApp:
+
+    def __init__(self, root):
+        self.root = root
+        root.title("Balanced Audit Sampling Tool")
+        root.geometry("1650x900")
+
+        self.df = None
+        self.sampled = None
+        self.stats = None
+        self.alloc = None
+
+        self.build_ui()
+
+    # ---------------- UI ----------------
+
+    def build_ui(self):
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill="both", expand=True)
+
+        self.tab_data = ttk.Frame(nb)
+        self.tab_results = ttk.Frame(nb)
+        self.tab_export = ttk.Frame(nb)
+
+        nb.add(self.tab_data, text="Data & Strata")
+        nb.add(self.tab_results, text="Results")
+        nb.add(self.tab_export, text="Export")
+
+        self.build_data_tab()
+        self.build_results_tab()
+        self.build_export_tab()
+
+    def build_data_tab(self):
+        top = ttk.Frame(self.tab_data)
+        top.pack(fill="x", pady=5)
+
+        ttk.Button(top, text="Load Dataset", command=self.load_data).pack(side="left")
+
+        ttk.Label(top, text="Region").pack(side="left", padx=5)
+        self.region_cb = ttk.Combobox(top, width=20)
+        self.region_cb.pack(side="left")
+
+        ttk.Label(top, text="Product").pack(side="left", padx=5)
+        self.product_cb = ttk.Combobox(top, width=20)
+        self.product_cb.pack(side="left")
+
+        ttk.Button(top, text="Run Sampling", command=self.run_sampling).pack(side="right")
+
+        self.preview = self.create_tree(self.tab_data)
+
+    def build_results_tab(self):
+        self.summary = tk.Text(self.tab_results, height=6)
+        self.summary.pack(fill="x")
+
+        self.table = self.create_tree(self.tab_results)
+
+    def build_export_tab(self):
+        frame = ttk.Frame(self.tab_export)
+        frame.pack(fill="x", pady=10)
+
+        ttk.Button(frame, text="Export Sampled Data", command=self.export_sampled).pack(side="left", padx=5)
+        ttk.Button(frame, text="Export Stratum Stats", command=self.export_stats).pack(side="left", padx=5)
+        ttk.Button(frame, text="Export Allocation", command=self.export_alloc).pack(side="left", padx=5)
+        ttk.Button(frame, text="Export Unsampled Strata", command=self.export_unsampled).pack(side="left", padx=5)
+        ttk.Button(frame, text="Export Methodology", command=self.export_doc).pack(side="left", padx=5)
+
+        self.log = tk.Text(self.tab_export)
+        self.log.pack(fill="both", expand=True)
+
+    def create_tree(self, parent):
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True)
+
+        tree = ttk.Treeview(frame)
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree.pack(fill="both", expand=True, side="left")
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+
+        return tree
+
+    # ---------------- DATA ----------------
+
+    def load_data(self):
+        path = filedialog.askopenfilename(filetypes=[("CSV/Excel", "*.csv *.xlsx")])
+        if not path:
+            return
+
+        self.df = pd.read_csv(path) if path.endswith(".csv") else pd.read_excel(path)
+
+        cols = list(self.df.columns)
+        self.region_cb["values"] = cols
+        self.product_cb["values"] = cols
+
+        self.show_preview(self.df.head(200))
+
+    def show_preview(self, df):
+        self.preview.delete(*self.preview.get_children())
+        self.preview["columns"] = list(df.columns)
+        self.preview["show"] = "headings"
+
+        for c in df.columns:
+            self.preview.heading(c, text=c)
+            self.preview.column(c, width=140)
+
+        for _, r in df.iterrows():
+            self.preview.insert("", "end", values=list(r))
+
+    # ---------------- SAMPLING ----------------
+
+    def run_sampling(self):
+        r = self.region_cb.get()
+        p = self.product_cb.get()
+
+        if not r or not p:
+            messagebox.showerror("Error", "Region & Product required")
+            return
+
+        df = build_stratum(self.df.copy(), [r, p])
+        self.stats = stratum_statistics(df)
+        self.alloc, target = balanced_allocation(df, self.stats)
+        self.sampled, self.unsampled = draw_sample(df, self.alloc)
+
+        self.display_results(target)
+
+    def display_results(self, target):
+        self.summary.delete("1.0", tk.END)
+        self.summary.insert("end", f"""
+Total Records : {len(self.df)}
+Total Strata  : {len(self.stats)}
+Target Sample : {target}
+Actual Sample : {len(self.sampled)}
+""")
+
+        self.table.delete(*self.table.get_children())
+        self.table["columns"] = list(self.alloc.columns)
+        self.table["show"] = "headings"
+
+        for c in self.alloc.columns:
+            self.table.heading(c, text=c)
+            self.table.column(c, width=180)
+
+        for _, row in self.alloc.iterrows():
+            self.table.insert("", "end", values=list(row))
+
+    # ---------------- EXPORTS ----------------
+
+    def export_sampled(self):
+        path = f"{EXPORT_DIR}/sampled_{timestamp()}.xlsx"
+        self.sampled.to_excel(path, index=False)
+        self.log.insert("end", f"Sample exported → {path}\n")
+
+    def export_stats(self):
+        path = f"{EXPORT_DIR}/stratum_stats_{timestamp()}.xlsx"
+        self.stats.to_excel(path, index=False)
+        self.log.insert("end", f"Stats exported → {path}\n")
+
+    def export_alloc(self):
+        path = f"{EXPORT_DIR}/allocation_{timestamp()}.xlsx"
+        self.alloc.to_excel(path, index=False)
+        self.log.insert("end", f"Allocation exported → {path}\n")
+
+    def export_unsampled(self):
+        path = f"{EXPORT_DIR}/unsampled_strata_{timestamp()}.xlsx"
+        pd.DataFrame(self.unsampled, columns=["Unsampled_Stratum"]).to_excel(path, index=False)
+        self.log.insert("end", f"Unsampled strata exported → {path}\n")
+
+    def export_doc(self):
+        path = f"{EXPORT_DIR}/methodology_{timestamp()}.txt"
+        with open(path, "w") as f:
+            f.write("""
+Balanced Stratified Sampling Method
+
+• Strata defined by selected Region + Product.
+• One record selected from every stratum.
+• Remaining samples allocated using √N weighting.
+• Prevents dominance bias.
+• Ensures operational representativeness.
+• Sample bounded between 300–350.
+""")
+        self.log.insert("end", f"Methodology exported → {path}\n")
+
+def timestamp():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# =====================================================
+# RUN
+# =====================================================
+if __name__ == "__main__":
+    root = tk.Tk()
+    SamplingApp(root)
+    root.mainloop()
