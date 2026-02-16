@@ -1,0 +1,69 @@
+def allocate_samples_balanced(df, full_stats, max_sample):
+    """
+    Industry-style balanced stratified allocation.
+    Uses square-root allocation to avoid dominance bias.
+    """
+
+    total_strata = len(full_stats)
+
+    # --- Step 1: Guarantee 1 sample per stratum
+    full_stats = full_stats.copy()
+    full_stats["base_alloc"] = 1
+
+    base_used = total_strata
+
+    if base_used >= max_sample:
+        # rare case: more strata than allowed sample
+        full_stats["final_alloc"] = 1
+        return full_stats
+
+    # --- Step 2: Remaining sample to distribute
+    remaining = max_sample - base_used
+
+    # --- Step 3: Square-root weights (industry balanced method)
+    full_stats["sqrt_weight"] = np.sqrt(full_stats["records"])
+    total_weight = full_stats["sqrt_weight"].sum()
+
+    full_stats["raw_extra"] = (full_stats["sqrt_weight"] / total_weight) * remaining
+
+    # --- Step 4: Largest Remainder Allocation (deterministic)
+    full_stats["extra_alloc"] = np.floor(full_stats["raw_extra"]).astype(int)
+
+    drift = remaining - full_stats["extra_alloc"].sum()
+
+    if drift > 0:
+        remainders = full_stats["raw_extra"] - full_stats["extra_alloc"]
+        full_stats.loc[remainders.nlargest(drift).index, "extra_alloc"] += 1
+
+    full_stats["final_alloc"] = full_stats["base_alloc"] + full_stats["extra_alloc"]
+
+    return full_stats
+
+
+def perform_sampling_balanced(df, allocation_table):
+    """
+    Draw samples exactly per allocated counts.
+    No proportional dominance allowed.
+    """
+
+    sampled_idx = []
+
+    for _, row in allocation_table.iterrows():
+        stratum = row["_FULL_STRATUM_"]
+        take = int(row["final_alloc"])
+
+        pool = df[df["_FULL_STRATUM_"] == stratum]
+
+        take = min(take, len(pool))
+
+        chosen = pool.sample(take, random_state=42)
+        sampled_idx.extend(chosen.index.tolist())
+
+    sampled = df.loc[sampled_idx]
+
+    unsampled_strata = sorted(
+        set(df["_FULL_STRATUM_"].unique()) -
+        set(sampled["_FULL_STRATUM_"].unique())
+    )
+
+    return sampled, unsampled_strata
