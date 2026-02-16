@@ -1,0 +1,63 @@
+def internal_spread_coverage(df, sampled, spread_col):
+    """
+    Builds coverage statistics of Internal Spread values within each stratum.
+    """
+
+    coverage_rows = []
+
+    for stratum, full_grp in df.groupby("_STRATUM_"):
+        sampled_grp = sampled[sampled["_STRATUM_"] == stratum]
+
+        total_unique = set(full_grp[spread_col].dropna().unique())
+        sampled_unique = set(sampled_grp[spread_col].dropna().unique())
+
+        unsampled_unique = total_unique - sampled_unique
+
+        coverage_pct = (
+            len(sampled_unique) / len(total_unique) * 100
+            if len(total_unique) > 0 else 0
+        )
+
+        coverage_rows.append({
+            "Stratum": stratum,
+            "Total_Unique_Values": len(total_unique),
+            "Sampled_Unique_Values": len(sampled_unique),
+            "Unsampled_Unique_Values": len(unsampled_unique),
+            "Coverage_%": round(coverage_pct, 2)
+        })
+
+    return pd.DataFrame(coverage_rows)
+
+
+#inside run sampling 
+if spread:
+    self.spread_coverage = internal_spread_coverage(df, self.sampled, spread)
+else:
+    self.spread_coverage = None
+
+#modufy display resukts 
+if self.spread_coverage is not None:
+    top = tk.Toplevel(self.root)
+    top.title("Internal Spread Coverage")
+
+    tree = ttk.Treeview(top)
+    tree.pack(fill="both", expand=True)
+
+    tree["columns"] = list(self.spread_coverage.columns)
+    tree["show"] = "headings"
+
+    for c in self.spread_coverage.columns:
+        tree.heading(c, text=c)
+        tree.column(c, width=160)
+
+    for _, row in self.spread_coverage.iterrows():
+        tree.insert("", "end", values=list(row))
+
+#add export button
+ttk.Button(self.tab_export,
+           text="Export Internal Spread Coverage",
+           command=self.export_spread).pack(side="left", padx=5)
+
+def export_spread(self):
+    if self.spread_coverage is not None:
+        self.spread_coverage.to_excel(f"{EXPORT_DIR}/internal_spread_coverage.xlsx", index=False)
