@@ -1,0 +1,144 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from io import BytesIO
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+MAX_SAMPLE = 350
+MIN_SAMPLE = 300
+
+st.set_page_config(layout="wide")
+st.title("QA Balanced Sampling Tool")
+
+# -----------------------------
+# FUNCTIONS (UNCHANGED LOGIC)
+# -----------------------------
+def build_stratum(df, cols):
+    df["_STRATUM_"] = df[cols].astype(str).agg(" | ".join, axis=1)
+    return df
+
+def stratum_stats(df):
+    stats = df.groupby("_STRATUM_").size().reset_index(name="population")
+    stats["sqrt_weight"] = np.sqrt(stats["population"])
+    return stats.sort_values("population", ascending=False)
+
+def allocate_samples(stats, total_records, mode):
+    target = min(MAX_SAMPLE, max(MIN_SAMPLE, int(total_records * 0.10)))
+    stats = stats.copy()
+    stats["base"] = 1
+    remaining = target - len(stats)
+
+    if remaining <= 0:
+        stats["final_alloc"] = 1
+        return stats, target
+
+    if mode == "Balanced (QA)":
+        weights = np.sqrt(stats["population"])
+    else:
+        weights = stats["population"]
+
+    weights = weights / weights.sum()
+    stats["extra"] = np.floor(weights * remaining).astype(int)
+
+    drift = remaining - stats["extra"].sum()
+    if drift > 0:
+        stats.iloc[:drift, stats.columns.get_loc("extra")] += 1
+
+    stats["final_alloc"] = stats["base"] + stats["extra"]
+    return stats, target
+
+def diversified_sample(pool, n, spread_col):
+    if not spread_col:
+        return pool.sample(n)
+
+    grp = pool.groupby(spread_col).size().reset_index(name="cnt")
+    grp["w"] = np.sqrt(grp["cnt"])
+    grp["alloc"] = (grp["w"] / grp["w"].sum()) * n
+    grp["alloc"] = np.floor(grp["alloc"]).astype(int)
+
+    drift = n - grp["alloc"].sum()
+    if drift > 0:
+        grp.iloc[:drift, grp.columns.get_loc("alloc")] += 1
+
+    parts = []
+    for _, r in grp.iterrows():
+        sub = pool[pool[spread_col] == r[spread_col]]
+        take = min(r["alloc"], len(sub))
+        parts.append(sub.sample(take))
+
+    return pd.concat(parts)
+
+def draw_samples(df, alloc, spread_col):
+    samples = []
+    for _, row in alloc.iterrows():
+        pool = df[df["_STRATUM_"] == row["_STRATUM_"]]
+        samples.append(diversified_sample(pool, row["final_alloc"], spread_col))
+    return pd.concat(samples)
+
+def to_excel(df):
+    output = BytesIO()
+    df.to_excel(output, index=False)
+    return output.getvalue()
+
+# -----------------------------
+# UI INPUT
+# -----------------------------
+uploaded = st.file_uploader("Upload Dataset", type=["csv","xlsx"])
+
+if uploaded:
+
+    df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
+
+    st.success(f"{len(df)} records loaded")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    region = col1.selectbox("Region Column", df.columns)
+    product = col2.selectbox("Product Column", df.columns)
+    spread = col3.selectbox("Internal Spread Column (Optional)", [""] + list(df.columns))
+    mode = col4.selectbox("Allocation Mode", ["Balanced (QA)", "Proportional (Statistical)"])
+
+    if st.button("Run Sampling"):
+
+        df = build_stratum(df, [region, product])
+        stats = stratum_stats(df)
+
+        alloc, target = allocate_samples(stats, len(df), mode)
+        sampled = draw_samples(df, alloc, spread if spread else None)
+
+        # -----------------------------
+        # RESULTS
+        # -----------------------------
+        st.subheader("Population Overview")
+        st.write(f"Total Records: {len(df)}")
+        st.write(f"Total Strata: {len(stats)}")
+        st.write(f"Target Sample: {target}")
+        st.write(f"Actual Sample: {len(sampled)}")
+
+        st.subheader("Stratum Statistics")
+        st.dataframe(stats, use_container_width=True)
+
+        st.subheader("Allocation Table")
+        st.dataframe(alloc, use_container_width=True)
+
+        st.subheader("Sample Preview")
+        st.dataframe(sampled.head(50), use_container_width=True)
+
+        # -----------------------------
+        # EXPORTS
+        # -----------------------------
+        st.subheader("Download Outputs")
+
+        st.download_button("Download Sample",
+            to_excel(sampled),
+            "sampled_data.xlsx")
+
+        st.download_button("Download Stratum Stats",
+            to_excel(stats),
+            "stratum_stats.xlsx")
+
+        st.download_button("Download Allocation",
+            to_excel(alloc),
+            "allocation.xlsx")
