@@ -1,0 +1,130 @@
+import pandas as pd
+import numpy as np
+import pytest
+
+from sampling_logic import (
+    build_stratum,
+    stratum_stats,
+    allocate_samples,
+    diversified_sample,
+    draw_samples
+)
+
+# ---------------------------------------------------
+# Test Data Generator (inside same file)
+# ---------------------------------------------------
+def generate_test_data(size=5000):
+    np.random.seed(42)
+
+    df = pd.DataFrame({
+        "Region": np.random.choice(["APAC", "EMEA", "US"], size),
+        "Product": np.random.choice(["FX", "IRS"], size),
+        "BUI": np.random.choice(["Desk1", "Desk2", "Desk3", "Desk4"], size),
+        "Value": np.random.randn(size)
+    })
+    return df
+
+
+# ---------------------------------------------------
+# 1. Test Stratum Creation
+# ---------------------------------------------------
+def test_build_stratum():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+
+    assert "_STRATUM_" in df.columns
+    assert df["_STRATUM_"].str.contains("|", regex=False).any()
+
+
+# ---------------------------------------------------
+# 2. Test Stratum Stats Sum Matches Population
+# ---------------------------------------------------
+def test_stratum_stats_population_sum():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+    stats = stratum_stats(df)
+
+    assert stats["population"].sum() == len(df)
+
+
+# ---------------------------------------------------
+# 3. Test Sample Size Bounds (300–350)
+# ---------------------------------------------------
+def test_sample_size_bounds():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+    stats = stratum_stats(df)
+
+    alloc, target = allocate_samples(stats, len(df), "Balanced (QA)")
+
+    assert 300 <= target <= 350
+
+
+# ---------------------------------------------------
+# 4. Test Balanced vs Proportional Mode Difference
+# ---------------------------------------------------
+def test_modes_produce_different_allocations():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+    stats = stratum_stats(df)
+
+    alloc_bal, _ = allocate_samples(stats, len(df), "Balanced (QA)")
+    alloc_prop, _ = allocate_samples(stats, len(df), "Proportional (Statistical)")
+
+    assert not alloc_bal["final_alloc"].equals(alloc_prop["final_alloc"])
+
+
+# ---------------------------------------------------
+# 5. Test At Least One Sample Per Stratum
+# ---------------------------------------------------
+def test_each_stratum_has_minimum_one():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+    stats = stratum_stats(df)
+
+    alloc, _ = allocate_samples(stats, len(df), "Balanced (QA)")
+
+    assert (alloc["final_alloc"] >= 1).all()
+
+
+# ---------------------------------------------------
+# 6. Test Draw Sample Row Count
+# ---------------------------------------------------
+def test_draw_samples_row_count():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+    stats = stratum_stats(df)
+
+    alloc, target = allocate_samples(stats, len(df), "Balanced (QA)")
+    sampled = draw_samples(df, alloc, "BUI")
+
+    assert len(sampled) == target
+
+
+# ---------------------------------------------------
+# 7. Test Internal Spread Diversification
+# ---------------------------------------------------
+def test_internal_spread_diversification():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+    stats = stratum_stats(df)
+
+    alloc, _ = allocate_samples(stats, len(df), "Balanced (QA)")
+    sampled = draw_samples(df, alloc, "BUI")
+
+    # Ensure sampled BUI count is reasonable
+    assert sampled["BUI"].nunique() > 1
+
+
+# ---------------------------------------------------
+# 8. Test Sampling Without Internal Spread (Pure Random)
+# ---------------------------------------------------
+def test_sampling_without_internal_spread():
+    df = generate_test_data()
+    df = build_stratum(df, ["Region", "Product"])
+    stats = stratum_stats(df)
+
+    alloc, target = allocate_samples(stats, len(df), "Balanced (QA)")
+    sampled = draw_samples(df, alloc, None)
+
+    assert len(sampled) == target
